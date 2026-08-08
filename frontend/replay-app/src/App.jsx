@@ -75,9 +75,11 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     basePath,
   });
   const [ply, setPly] = useState(0);
+  const [playing, setPlaying] = useState(false);
 
   useEffect(() => {
     setPly(0);
+    setPlaying(false);
   }, [status]);
 
   const fen = useMemo(() => {
@@ -93,18 +95,56 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     return c.fen();
   }, [moves, ply, startFen]);
 
+  // Autoplay: advance one ply on a timer; stop at the last move.
+  useEffect(() => {
+    if (!playing || status !== "ready") return undefined;
+    const id = setInterval(() => {
+      setPly((p) => (p >= moves.length ? (setPlaying(false), p) : p + 1));
+    }, 600);
+    return () => clearInterval(id);
+  }, [playing, status, moves.length]);
+
+  const step = (delta) =>
+    setPly((p) => Math.min(moves.length, Math.max(0, p + delta)));
+
+  const togglePlay = () => {
+    if (playing) {
+      setPlaying(false);
+    } else {
+      setPly(0);
+      setPlaying(true);
+    }
+  };
+
   useEffect(() => {
     if (status !== "ready") return undefined;
     const handler = (e) => {
-      if (e.key === "ArrowRight") {
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") {
         setPly((p) => Math.min(moves.length, p + 1));
-      } else if (e.key === "ArrowLeft") {
+      } else if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
         setPly((p) => Math.max(0, p - 1));
+      } else if (e.key === "Home") {
+        setPly(0);
+      } else if (e.key === "End") {
+        setPly(moves.length);
+      } else if (e.key === " ") {
+        e.preventDefault();
+        togglePlay();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [status, moves.length]);
+  }, [status, moves.length, playing]);
+
+  const onWheel = (e) => {
+    // Wheel steps moves only outside the move list, so the move list can
+    // still be scrolled normally; never preventDefault, so the page scroll
+    // is never blocked.
+    if (e.target && e.target.closest && e.target.closest(".moves-list")) {
+      return;
+    }
+    step(e.deltaY > 0 ? 1 : -1);
+  };
 
   // Keep the active move visible while navigating a long game.
   useEffect(() => {
@@ -134,7 +174,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   }
 
   return (
-    <div className="replay">
+    <div className="replay" onWheel={onWheel}>
       <div className="replay-board-col">
         {/* White at the bottom: react-chessboard's default white orientation
             places White at the bottom, so Black card sits above the board. */}
@@ -183,7 +223,16 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           >
             last
           </button>
+          <button
+            type="button"
+            aria-label="Play or pause autoplay"
+            onClick={togglePlay}
+            className={playing ? "active" : ""}
+          >
+            {playing ? "⏸" : "▶"}
+          </button>
         </div>
+        <div className="demo-note">←/→ ↑/↓ step · Home/End jump · wheel step · Space play</div>
       </div>
 
       <div className="replay-side-col">
