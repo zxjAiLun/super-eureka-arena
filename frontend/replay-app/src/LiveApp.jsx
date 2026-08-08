@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
@@ -113,14 +113,30 @@ export default function LiveApp({ tournamentId, basePath }) {
     payload.state === "pending" ||
     payload.state === "pair_done";
 
+  const [boardSize, setBoardSize] = useState(480);
+  const replayRef = useRef(null);
+  useEffect(() => {
+    const el = replayRef.current;
+    if (!el) return undefined;
+    const compute = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      setBoardSize(Math.max(220, Math.min((w - 20) / 2 - 10, h - 170)));
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [phase]);
+
   return (
-    <div className="replay">
+    <div className="replay" ref={replayRef}>
       <div className="replay-board-col">
         <div className="player-card top">
           <span className="color-dot black" />
           <span className="player-name">{payload.engine_a_label}</span>
         </div>
-        <div className="board-wrap" data-fen={fen}>
+        <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
           <Chessboard options={{ position: fen, allowDragging: false }} />
         </div>
         <div className="player-card bottom">

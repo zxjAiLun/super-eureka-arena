@@ -1,17 +1,41 @@
-{% extends "public_base.html" %}
-{% block title %}ChessArena — Live{% endblock %}
-{% block head %}
-<link rel="stylesheet" href="{{ settings.base_path }}/static/replay-app/assets/index-CPuo8myo.css">
-{% endblock %}
-{% block content %}
-<p><a href="{{ settings.base_path }}/matches/">&larr; Back to matches</a></p>
-<div
-  id="replay-root"
-  data-mode="live"
-  data-tournament-id="{{ tournament_id or '' }}"
-  data-base-path="{{ settings.base_path }}"
-></div>
-{% endblock %}
-{% block scripts %}
-<script type="module" src="{{ settings.base_path }}/static/replay-app/assets/index-I5vrskFy.js"></script>
-{% endblock %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChessArena — Live</title>
+  <link rel="stylesheet" href="{{ settings.base_path }}/static/replay-app/assets/index-BwYqCNrr.css">
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body { overflow: hidden; background: var(--demo-bg, #161b22); }
+    .replay-page { height: 100dvh; display: flex; flex-direction: column; }
+    .replay-header {
+      flex: 0 0 auto; display: flex; align-items: center; gap: 1rem;
+      padding: 0.6rem 1rem; background: var(--demo-card, #1c222b);
+      border-bottom: 1px solid var(--demo-border, #2d343f);
+      color: #e6edf3; font-size: 0.9rem;
+    }
+    .replay-header a { color: #58a6ff; text-decoration: none; }
+    .replay-header a:hover { text-decoration: underline; }
+    .replay-main { flex: 1; min-height: 0; padding: 0.6rem 1rem 0.8rem; }
+    #replay-root { height: 100%; }
+  </style>
+</head>
+<body>
+  <div class="replay-page">
+    <header class="replay-header">
+      <a href="{{ settings.base_path }}/matches/">&larr; Back to matches</a>
+      <span class="replay-title">Live</span>
+    </header>
+    <main class="replay-main">
+      <div
+        id="replay-root"
+        data-mode="live"
+        data-tournament-id="{{ tournament_id or '' }}"
+        data-base-path="{{ settings.base_path }}"
+      ></div>
+    </main>
+  </div>
+  <script type="module" src="{{ settings.base_path }}/static/replay-app/assets/index-DaKs0tIW.js"></script>
+</body>
+</html>

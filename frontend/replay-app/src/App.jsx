@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { Chess } from "chess.js";
 
@@ -76,10 +76,30 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   });
   const [ply, setPly] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const replayRef = useRef(null);
+  const [boardSize, setBoardSize] = useState(480);
 
   useEffect(() => {
     setPly(0);
     setPlaying(false);
+  }, [status]);
+
+  // Size the board to fit the available height (and the left half of the
+  // width) so the replay never needs the page to scroll.
+  useEffect(() => {
+    if (status !== "ready") return undefined;
+    const el = replayRef.current;
+    if (!el) return undefined;
+    const compute = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      const size = Math.max(220, Math.min((w - 20) / 2 - 10, h - 170));
+      setBoardSize(size);
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
   }, [status]);
 
   const fen = useMemo(() => {
@@ -174,7 +194,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   }
 
   return (
-    <div className="replay" onWheel={onWheel}>
+    <div className="replay" ref={replayRef} onWheel={onWheel}>
       <div className="replay-board-col">
         {/* White at the bottom: react-chessboard's default white orientation
             places White at the bottom, so Black card sits above the board. */}
@@ -182,7 +202,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           <span className="color-dot black" />
           <span className="player-name">{game.black_engine}</span>
         </div>
-        <div className="board-wrap" data-fen={fen}>
+        <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
           <Chessboard options={{ position: fen, allowDragging: false }} />
         </div>
         <div className="player-card bottom">
