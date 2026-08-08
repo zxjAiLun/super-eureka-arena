@@ -273,6 +273,39 @@ def test_runtime_policy_options_omitted_when_not_declared():
     assert args == []
 
 
+def test_runtime_option_omitted_when_matches_declared_default():
+    """cutechess 1.5.x warns 'doesn't have option Ponder/UCI_Chess960' even
+    when the engine exposes them (Stockfish does, under UCI_LimitStrength too),
+    so an option that merely re-asserts the engine's declared default must be
+    omitted to keep the strict verifier's stderr check green."""
+    engine = {
+        "uci_options": {},
+        "uci_options_schema": {
+            "Ponder": {"type": "check", "default": "false"},
+            "UCI_Chess960": {"type": "check", "default": "false"},
+            "Hash": {"type": "spin", "default": "16", "min": 1, "max": 1024},
+        },
+    }
+    args = engine_option_args(
+        engine, hash_mb=32, ponder=False, chess960=False
+    )
+    assert "option.Ponder=false" not in args
+    assert "option.UCI_Chess960=false" not in args
+    # Hash differs from its default (32 != 16) -> still sent.
+    assert "option.Hash=32" in args
+
+
+def test_runtime_option_forced_when_differs_from_declared_default():
+    """An engine that defaults Ponder=true must still be forced to false for
+    deterministic standard chess; omission only applies to redundant options."""
+    engine = {
+        "uci_options": {},
+        "uci_options_schema": {"Ponder": {"type": "check", "default": "true"}},
+    }
+    args = engine_option_args(engine, ponder=False)
+    assert "option.Ponder=false" in args
+
+
 def test_hash_out_of_range_rejected_before_launch():
     engine = {
         "uci_options": {},

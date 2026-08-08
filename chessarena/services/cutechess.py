@@ -101,6 +101,18 @@ def engine_option_args(
                 f"{name}: engine declares type {declared!r}, "
                 f"expected {expected_type!r}"
             )
+        rendered = _option_value(value)
+        # cutechess 1.5.x warns "doesn't have option X" for the optional
+        # policy booleans (Ponder/OwnBook/UCI_Chess960) even when the engine
+        # exposes them, so skip an option that merely re-asserts the engine's
+        # declared default.  The value still MUST be forced whenever it differs
+        # from the default (e.g. an engine that defaults Ponder=true), so this
+        # only ever omits redundant options - the strict verifier treats the
+        # spurious warning as a failure, so avoiding it is correctness, not
+        # noise.  Mandatory options that cutechess does not warn about (Hash,
+        # Threads) are unaffected and only omitted when they equal the default.
+        if str(decl.get("default") or "").lower() == str(rendered).lower():
+            continue
         if expected_type == "spin":
             lo, hi = decl.get("min"), decl.get("max")
             if lo is not None and int(value) < lo:
@@ -111,7 +123,7 @@ def engine_option_args(
                 raise CutechessLaunchError(
                     f"{name}={value} above engine maximum {hi}"
                 )
-        args.append(f"option.{name}={_option_value(value)}")
+        args.append(f"option.{name}={rendered}")
     return args
 
 
