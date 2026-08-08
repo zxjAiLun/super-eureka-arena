@@ -77,6 +77,17 @@
   {% if tournament.force_cancel_requested %}<span class="muted"> (force cancel requested)</span>{% endif %}
 </section>
 
+{% if can_delete %}
+<section class="panel">
+  <h3>Danger zone</h3>
+  <form method="post" action="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/delete"
+        onsubmit="return confirm('Delete this match? This removes its games and run artifacts permanently.')">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <button type="submit" class="danger">Delete match</button>
+  </form>
+</section>
+{% endif %}
+
 <section class="panel">
   <h3>Configuration</h3>
   <dl>

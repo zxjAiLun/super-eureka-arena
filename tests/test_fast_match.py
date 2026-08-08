@@ -6,7 +6,15 @@ from __future__ import annotations
 import re
 
 from chessarena.api import tournaments as tournaments_api
-from chessarena.models import COMPLETED, Tournament
+from chessarena.models import (
+    COMPLETED,
+    RUNNING,
+    Event,
+    Game,
+    PairJob,
+    Tournament,
+    utcnow,
+)
 
 NEW = "/chessarena/admin/tournaments/new"
 
@@ -81,7 +89,99 @@ def test_completed_match_summary_and_run_again(
     assert "4 / 2 / 2" in r.text
     assert "Replay games" in r.text
     assert "Run again" in r.text
+    assert "Delete match" in r.text
     # Run again prefills the original match parameters into new-match.
     assert f"/admin/tournaments/new?engine_a_preset=" in r.text
     assert "opening_set_id=test-openings-v1" in r.text
     assert "pairs=8" in r.text
+
+
+# ---------------------------------------------------------------------------
+# P4.5b match delete
+# ---------------------------------------------------------------------------
+def _make_terminal_match(settings, engine_factory, tournament_factory, status):
+    """Create a terminal/running tournament with a game, an event, and a run
+    artifact directory so delete can be exercised end to end."""
+    tid = tournament_factory(name="Del Me", pairs=1, status=status)
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        t.completed_pairs = 1
+        t.candidate_wins = 1
+        t.finished_at = utcnow()
+        pair = t.pair_jobs[0]
+        pair.status = "COMPLETED"
+        run_dir = settings.run_root / tid / "pairs" / "000000" / "attempt-01"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        pgn_path = run_dir / "match.pgn"
+        pgn_path.write_text("dummy", encoding="utf-8")
+        pair.run_directory = str(run_dir)
+        g = Game(
+            tournament_id=tid,
+            pair_job_id=pair.id,
+            game_number=1,
+            white_engine="A",
+            black_engine="B",
+            opening_index=0,
+            result="1-0",
+            pgn_path=str(pgn_path),
+            verified=True,
+        )
+        ev = Event(tournament_id=tid, event_type="tournament_created", payload={})
+        session.add_all([g, ev])
+        session.commit()
+    return tid
+
+
+def _csrf(app_client):
+    # GET any admin page to set the CSRF cookie.
+    app_client.get("/chessarena/admin/tournaments/new")
+    token = app_client.cookies.get("arena_csrf")
+    assert token
+    return token
+
+
+def _counts(engine_factory, tid):
+    with engine_factory() as session:
+        return (
+            session.query(Tournament).filter(Tournament.id == tid).first() is not None,
+            session.query(Game).filter(Game.tournament_id == tid).first() is not None,
+            session.query(Event).filter(Event.tournament_id == tid).first() is not None,
+            session.query(PairJob).filter(PairJob.tournament_id == tid).first() is not None,
+        )
+
+
+def test_delete_completed_match(app_client, settings, engine_factory,
+                                tournament_factory):
+    tid = _make_terminal_match(settings, engine_factory, tournament_factory, COMPLETED)
+    assert (settings.run_root / tid).exists()
+    r = app_client.post(
+        f"/chessarena/admin/tournaments/{tid}/delete",
+        data={"_csrf_token": _csrf(app_client)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 303
+    assert _counts(engine_factory, tid) == (False, False, False, False)
+    assert not (settings.run_root / tid).exists()
+
+
+def test_delete_running_rejected(app_client, settings, engine_factory,
+                                 tournament_factory):
+    tid = _make_terminal_match(settings, engine_factory, tournament_factory, RUNNING)
+    r = app_client.post(
+        f"/chessarena/admin/tournaments/{tid}/delete",
+        data={"_csrf_token": _csrf(app_client)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 409
+    # Nothing removed.
+    assert _counts(engine_factory, tid) == (True, True, True, True)
+    assert (settings.run_root / tid).exists()
+
+
+def test_delete_not_found(app_client):
+    r = app_client.post(
+        "/chessarena/admin/tournaments/does-not-exist/delete",
+        data={"_csrf_token": _csrf(app_client)},
+        follow_redirects=False,
+    )
+    assert r.status_code == 404

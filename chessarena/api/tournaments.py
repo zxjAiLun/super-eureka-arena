@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import random
+import shutil
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -683,6 +684,9 @@ def admin_dashboard(request: Request, session: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # P4.4 Fast Match Workflow: "last used" prefs + prefill for Run again.
 # ---------------------------------------------------------------------------
+DELETABLE_STATUSES = frozenset({DRAFT, COMPLETED, FAILED, CANCELLED})
+
+
 def _prefs_path(settings: Settings) -> Path:
     return settings.run_root.parent / "state" / "match_prefs.json"
 
@@ -869,6 +873,7 @@ def admin_tournament_detail(
             "score_percent": _score_percent(tournament),
             "opening_plies": opening_plies,
             "run_again": run_again,
+            "can_delete": tournament.status in DELETABLE_STATUSES,
             "has_combined": has_combined,
             "has_summary": has_summary,
             "has_manifest": has_manifest,
@@ -932,6 +937,53 @@ async def admin_tournament_force_cancel(
             f"{request.app.state.settings.base_path}/admin/tournaments/"
             f"{tournament_id}"
         ),
+        status_code=303,
+    )
+
+
+@admin_router.post("/admin/tournaments/{tournament_id}/delete",
+                   response_class=RedirectResponse)
+async def admin_tournament_delete(
+    request: Request,
+    tournament_id: str,
+    session: Session = Depends(get_db),
+):
+    """Permanently delete a terminal match and its run artifacts (P4.5b).
+
+    Only DRAFT / COMPLETED / FAILED / CANCELLED matches can be deleted.  Any
+    match the worker could still process (QUEUED / RUNNING / PAUSING / PAUSED)
+    is rejected.  Games and Events are removed explicitly before the
+    Tournament, whose ``pair_jobs`` relationship cascades; the isolated run
+    directory under ``run_root/<id>`` is removed as well.  Shared registry
+    rows (EngineBuild / EnginePreset / OpeningSet) are never touched.
+    """
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    t = (
+        session.query(Tournament)
+        .filter(Tournament.id == tournament_id)
+        .first()
+    )
+    if t is None:
+        raise HTTPException(status_code=404, detail="tournament not found")
+    if t.status not in DELETABLE_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail="cancel the match before deleting it",
+        )
+    run_dir = artifacts.tournament_run_dir(tournament_id)
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    session.query(Game).filter(Game.tournament_id == tournament_id).delete(
+        synchronize_session=False
+    )
+    session.query(Event).filter(Event.tournament_id == tournament_id).delete(
+        synchronize_session=False
+    )
+    session.delete(t)
+    session.commit()
+    return RedirectResponse(
+        url=f"{request.app.state.settings.base_path}/admin/",
         status_code=303,
     )
 
