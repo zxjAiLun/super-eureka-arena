@@ -1,18 +1,21 @@
 """Deploy-artifact contract tests.
 
-Regression checks on the deployed systemd unit and the GitHub Actions
-deployment workflows:
+Regression checks on the deployed server artifacts in this standalone Arena
+repository:
 
 - the API unit must start the application through its factory
   (chessarena.main:create_app --factory).  The API module exposes
   create_app(), not a module-level app, so the obsolete
   chessarena.main:app target crashes the service at bootstrap
   (uvicorn: Attribute "app" not found).
-- the deploy workflows must stage their upload archives inside the
-  repository workspace under a relative path.  appleboy/scp-action runs in
-  a Docker container whose working directory is /github/workspace, so a
-  runner-host /tmp path is invisible to it and the upload fails with
-  "tar: empty archive".
+- the release wrapper (deploy/arena-deploy.sh) must normalize its working
+  directory and run pip/Alembic from inside the release directory.
+- the nginx snippet keeps /admin/ and /api/v1/ behind Basic Auth while the
+  public replay subtree stays anonymous.
+
+GitHub SSH deploy workflows are NOT part of this contract: the engine's
+immutable-artifact publishing lives in the Engine repository, and the
+deprecated GitHub SSH deploy path is not restored here.
 """
 
 from __future__ import annotations
@@ -20,12 +23,10 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-API_UNIT = REPO_ROOT / "arena" / "deploy" / "chessarena-api.service"
-ENGINE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-engine-build.yml"
-ARENA_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "deploy-arena.yml"
-DEPLOY_WRAPPER = REPO_ROOT / "arena" / "deploy" / "arena-deploy.sh"
-NGINX_SNIPPET = REPO_ROOT / "arena" / "deploy" / "nginx-chessarena.conf"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+API_UNIT = REPO_ROOT / "deploy" / "chessarena-api.service"
+DEPLOY_WRAPPER = REPO_ROOT / "deploy" / "arena-deploy.sh"
+NGINX_SNIPPET = REPO_ROOT / "deploy" / "nginx-chessarena.conf"
 
 
 def test_api_unit_starts_through_the_application_factory():
@@ -38,84 +39,6 @@ def test_api_unit_starts_through_the_application_factory():
     assert "chessarena.main:create_app" in exec_line
     assert "--factory" in exec_line
     assert "chessarena.main:app" not in exec_line
-
-
-def _scp_sources(content: str) -> list[str]:
-    """Return the ``source:`` values of every appleboy/scp-action step."""
-    sources = []
-    # Iterate step blocks; find lines 'source: <value>' inside a step whose
-    # 'uses:' is appleboy/scp-action.  The value may contain spaces (e.g.
-    # GitHub expressions like "${{ steps.x.outputs.y }}"), so capture the
-    # rest of the line rather than a whitespace-free token.
-    blocks = re.split(r"\n\s*-\s+name:", content)
-    for block in blocks:
-        if "appleboy/scp-action" not in block:
-            continue
-        for line in block.splitlines():
-            m = re.match(r"\s*source:\s*(.*?)\s*$", line)
-            if m and m.group(1):
-                sources.append(m.group(1).strip())
-    return sources
-
-
-def test_deploy_workflows_stage_archives_in_the_workspace():
-    assert ENGINE_WORKFLOW.is_file(), f"missing {ENGINE_WORKFLOW}"
-    assert ARENA_WORKFLOW.is_file(), f"missing {ARENA_WORKFLOW}"
-    engine = ENGINE_WORKFLOW.read_text(encoding="utf-8")
-    arena = ARENA_WORKFLOW.read_text(encoding="utf-8")
-
-    # No scp-action source may point at a runner-host /tmp path (or any
-    # absolute path): the Docker action cannot see the runner host /tmp.
-    for src in _scp_sources(engine) + _scp_sources(arena):
-        assert not src.startswith("/"), f"scp source must be relative: {src!r}"
-        assert "/tmp" not in src, f"scp source must not use /tmp: {src!r}"
-
-    # Engine workflow: the archive created in the staging step must be the
-    # exact filename referenced by its upload step.
-    archive_m = re.search(
-        r'ARCHIVE="(build-[^\"]+\.tar\.gz)"', engine
-    )
-    assert archive_m, "engine workflow must define ARCHIVE=build-<id>.tar.gz"
-    archive = archive_m.group(1)
-    assert archive in _scp_sources(engine), (
-        "engine upload source must equal the staged archive filename"
-    )
-    # Workspace-relative staging: tar must write "$ARCHIVE", never /tmp/...
-    assert re.search(r"tar -C /tmp/build-stage -czf \"\$ARCHIVE\" \.", engine)
-    # Archive-validity checks before upload.
-    assert "test -s \"$ARCHIVE\"" in engine
-    assert "tar -tzf \"$ARCHIVE\" >/dev/null" in engine
-
-    # Arena workflow: packaged as arena.tar.gz and uploaded as arena.tar.gz.
-    assert re.search(r"-C arena -czf arena\.tar\.gz \.", arena)
-    assert "arena.tar.gz" in _scp_sources(arena)
-    assert "test -s arena.tar.gz" in arena
-    assert "tar -tzf arena.tar.gz >/dev/null" in arena
-
-
-def test_clean_venv_test_step_runs_fixture_subprocesses_from_venv():
-    """Executable fixtures use #!/usr/bin/env python3, so the clean-venv test
-    step must put the venv bin on PATH before invoking pytest.  Otherwise the
-    fake cutechess subprocess resolves /usr/bin/env python3 to the outer
-    setup-python interpreter, which does not own the installed 'chess' module,
-    and every fake-based test fails at setup (ModuleNotFoundError)."""
-    content = ARENA_WORKFLOW.read_text(encoding="utf-8")
-    match = re.search(
-        r"- name: Run arena tests from the clean venv\n(.*?)(?=\n\s*- name:|\n\s*- uses:|\Z)",
-        content,
-        re.DOTALL,
-    )
-    assert match, "missing 'Run arena tests from the clean venv' step"
-    step = match.group(1)
-
-    path_line = 'export PATH="/tmp/arena-venv/bin:$PATH"'
-    pytest_line = "/tmp/arena-venv/bin/python -m pytest tests/ -q"
-
-    assert path_line in step, "clean venv step must prepend the venv bin to PATH"
-    assert pytest_line in step, "clean venv step must invoke the venv python"
-    assert step.index(path_line) < step.index(pytest_line), (
-        "PATH export must precede the pytest invocation"
-    )
 
 
 def test_deploy_wrapper_normalizes_working_directories():
@@ -161,91 +84,6 @@ def test_deploy_wrapper_normalizes_working_directories():
     # target that would let an arbitrary caller cwd leak in.
     assert '"$VENV/bin/pip" install -e "$dest"' not in content
     assert '"$dest/alembic.ini"' not in content
-
-
-def _extract_health_parser(content: str) -> str:
-    """Extract the exact embedded python3 -c health parser from the workflow.
-
-    YAML block scalars strip the common indentation before the shell sees the
-    script, so the extracted code is dedented the same way (textwrap.dedent)
-    to match what python3 -c actually executes on the runner.
-    """
-    import textwrap
-
-    m = re.search(r"python3 -c '\n(.*?)\n\s*'", content, re.DOTALL)
-    assert m, "missing embedded health parser"
-    return textwrap.dedent(m.group(1))
-
-
-def _run_parser(code: str, payload: str) -> int:
-    import subprocess
-    import sys
-
-    return subprocess.run(
-        [sys.executable, "-c", code],
-        input=payload,
-        capture_output=True,
-        text=True,
-    ).returncode
-
-
-def test_deploy_health_gate_parses_json_structurally():
-    """The health gate must parse JSON structurally (json.load) instead of
-    grepping whitespace-sensitive substrings: the API returns compact JSON,
-    so the previous '"status": "ok"' grep produced a false negative and
-    rolled back a healthy deployment."""
-    content = ARENA_WORKFLOW.read_text(encoding="utf-8")
-
-    # No whitespace-sensitive health greps remain.
-    assert '"status": "ok"' not in content
-    assert 'grep -q "status' not in content
-    # Structural parsing and the four required fields.
-    assert "json.load" in content
-    for key in ("status", "database", "worker_heartbeat", "cutechess"):
-        assert f'"{key}"' in content
-    # The embedded python block must stay indented inside the YAML block
-    # scalar; a column-0 code line makes the workflow unparsable for GitHub
-    # (observed: deploy-arena lost its workflow_dispatch trigger).
-    assert "python3 -c '\nimport json" not in content
-
-    code = _extract_health_parser(content)
-    # Accept: compact, pretty/reordered, extra fields.
-    assert _run_parser(
-        code,
-        '{"status":"ok","database":"ok","worker_heartbeat":"ok","cutechess":"ok","active_tournament_id":null}',
-    ) == 0
-    assert _run_parser(
-        code,
-        '{\n  "worker_heartbeat": "ok",\n  "status": "ok",\n  "cutechess": "ok",\n  "database": "ok"\n}',
-    ) == 0
-    assert _run_parser(
-        code, '{"status":"ok","database":"ok","worker_heartbeat":"ok","cutechess":"ok","extra":1}'
-    ) == 0
-    # Reject: malformed, array, missing field, non-ok value, empty.
-    assert _run_parser(code, "not-json") != 0
-    assert _run_parser(code, "[]") != 0
-    assert _run_parser(
-        code, '{"status":"ok","database":"ok","worker_heartbeat":"ok"}'
-    ) != 0
-    assert _run_parser(
-        code,
-        '{"status":"ok","database":"ok","worker_heartbeat":"ok","cutechess":"nope"}',
-    ) != 0
-    assert _run_parser(code, "") != 0
-
-
-def test_deploy_release_provenance_marker():
-    """The release must record the exact workflow commit as DEPLOY_SOURCE_SHA
-    and verify it inside the produced archive."""
-    content = ARENA_WORKFLOW.read_text(encoding="utf-8")
-    assert (
-        'printf \'%s\\n\' "$GITHUB_SHA" > arena/DEPLOY_SOURCE_SHA' in content
-    )
-    assert 'test "$(cat arena/DEPLOY_SOURCE_SHA)" = "$GITHUB_SHA"' in content
-    assert (
-        'tar -xOf arena.tar.gz ./DEPLOY_SOURCE_SHA | grep -Fx "$GITHUB_SHA"'
-        in content
-    )
 
 
 def _nginx_locations(content: str) -> dict[str, str]:
