@@ -70,6 +70,24 @@ function Badges({ data }) {
 
 export default function LiveApp({ tournamentId, basePath }) {
   const { phase, payload } = useLive({ basePath, tournamentId });
+  const [boardSize, setBoardSize] = useState(480);
+  const replayRef = useRef(null);
+
+  // Hooks must be called unconditionally (before any early return).  Size the
+  // board to fit the available height; no-op while there is no board.
+  useEffect(() => {
+    const el = replayRef.current;
+    if (!el) return undefined;
+    const compute = () => {
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      setBoardSize(Math.max(220, Math.min((w - 20) / 2 - 10, h - 170)));
+    };
+    compute();
+    const ro = new ResizeObserver(compute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [phase]);
 
   if (phase === "loading") {
     return <div className="demo-message">Connecting to live status…</div>;
@@ -112,22 +130,6 @@ export default function LiveApp({ tournamentId, basePath }) {
     payload.state === "game_running" ||
     payload.state === "pending" ||
     payload.state === "pair_done";
-
-  const [boardSize, setBoardSize] = useState(480);
-  const replayRef = useRef(null);
-  useEffect(() => {
-    const el = replayRef.current;
-    if (!el) return undefined;
-    const compute = () => {
-      const w = el.clientWidth;
-      const h = el.clientHeight;
-      setBoardSize(Math.max(220, Math.min((w - 20) / 2 - 10, h - 170)));
-    };
-    compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [phase]);
 
   return (
     <div className="replay" ref={replayRef}>
