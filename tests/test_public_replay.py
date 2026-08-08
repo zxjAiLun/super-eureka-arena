@@ -16,7 +16,14 @@ import chess
 import chess.pgn
 import pytest
 
-from chessarena.models import COMPLETED, DRAFT, Game, Tournament, utcnow
+from chessarena.models import (
+    COMPLETED,
+    DRAFT,
+    RUNNING,
+    Game,
+    Tournament,
+    utcnow,
+)
 
 TEST_PGN_MOVES = [
     ("EngineA", "EngineB", "1-0", "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6"),
@@ -264,3 +271,103 @@ def test_unverified_game_not_public(settings, engine_factory, registered,
     assert app_client.get(f"/chessarena/games/{gid}").status_code == 404
     detail = app_client.get(f"/chessarena/public-api/v1/matches/{tid}").json()
     assert detail["games"] == []
+
+
+# ---------------------------------------------------------------------------
+# P4.3 v1: live match status (unverified runtime data)
+# ---------------------------------------------------------------------------
+def _running_pair(settings, session, t, opening_fen, stdout_text):
+    """Point pair 0 at a run dir with an opening.epd + stdout.log."""
+    pair = t.pair_jobs[0]
+    run_dir = settings.run_root / t.id / "pairs" / "000000" / "attempt-01"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "opening.epd").write_text(opening_fen + "\n", encoding="utf-8")
+    (run_dir / "stdout.log").write_text(stdout_text, encoding="utf-8")
+    pair.status = RUNNING
+    pair.run_directory = str(run_dir)
+    pair.started_at = utcnow()
+    return pair
+
+
+def test_live_idle_when_nothing_running(app_client):
+    r = app_client.get("/chessarena/public-api/v1/live")
+    assert r.status_code == 200
+    assert r.json()["status"] == "idle"
+
+
+def test_live_reports_running_pair(settings, engine_factory, tournament_factory,
+                                   app_client):
+    tid = tournament_factory(name="Live Match", pairs=2, status=RUNNING)
+    opening_fen = (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    )
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        _running_pair(
+            settings, session, t, opening_fen,
+            "Started game 1 of 2 (EngineA vs EngineB)\n",
+        )
+        session.commit()
+    r = app_client.get("/chessarena/public-api/v1/live")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "live"
+    assert body["tournament_id"] == tid
+    assert body["name"] == "Live Match"
+    assert body["pair_index"] == 0
+    assert body["game_in_pair"] == 1
+    assert body["games_total"] == 2
+    assert body["state"] == "game_running"
+    assert body["opening_fen"] == opening_fen
+    assert body["pairs_total"] == 2
+    # whitelist: no internal fields leak
+    text = json.dumps(body)
+    for forbidden in ("build_id", "binary_sha256", "git_sha", "run_root", "pgn_path"):
+        assert forbidden not in text
+
+
+def test_live_reports_last_result_and_pinned_id(
+    settings, engine_factory, tournament_factory, app_client
+):
+    tid = tournament_factory(name="Live Match", pairs=1, status=RUNNING)
+    opening_fen = (
+        "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+    )
+    stdout_text = (
+        "Started game 1 of 2 (EngineA vs EngineB)\n"
+        "Finished game 1 (EngineA vs EngineB): 1-0\n"
+        "Started game 2 of 2 (EngineB vs EngineA)\n"
+    )
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        _running_pair(settings, session, t, opening_fen, stdout_text)
+        session.commit()
+    r = app_client.get(f"/chessarena/public-api/v1/live?tournament_id={tid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "live"
+    assert body["game_in_pair"] == 2
+    assert body["last_result"] == "1-0"
+
+
+def test_live_completed_returns_match_url(app_client, completed_match):
+    tid, _, _ = completed_match
+    r = app_client.get(f"/chessarena/public-api/v1/live?tournament_id={tid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "completed"
+    assert body["match_url"].endswith(f"/matches/{tid}")
+    assert body["name"] == "Public Match"
+
+
+def test_live_page_renders(app_client, tournament_factory):
+    tid = tournament_factory(name="Live", pairs=1, status="RUNNING")
+    r = app_client.get("/chessarena/live")
+    assert r.status_code == 200
+    assert 'data-mode="live"' in r.text
+    assert 'id="replay-root"' in r.text
+    assert "/static/replay-app/assets/index-" in r.text
+    r2 = app_client.get(f"/chessarena/live?tournament_id={tid}")
+    assert r2.status_code == 200
+    assert f'data-tournament-id="{tid}"' in r2.text
+    assert app_client.get("/chessarena/live?tournament_id=not-a-real-id").status_code == 404

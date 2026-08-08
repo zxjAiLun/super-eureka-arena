@@ -8,14 +8,28 @@ stay behind the authenticated ``/api/v1`` tree (enforced by nginx).
 
 from __future__ import annotations
 
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
 
+from ..config import get_settings
 from ..db import get_db
-from ..models import COMPLETED, EngineBuild, EnginePreset, Game, Tournament
-from ..schemas import PublicGameOut, PublicMatchDetailOut, PublicMatchOut
+from ..models import (
+    COMPLETED,
+    QUEUED,
+    RUNNING,
+    EngineBuild,
+    EnginePreset,
+    Game,
+    Tournament,
+)
+from ..schemas import LiveOut, PublicGameOut, PublicMatchDetailOut, PublicMatchOut
 from ..services.replay import ReplayError, read_single_game_pgn
+from ..services.runtime_status import derive_runtime_status
 
 router = APIRouter(tags=["public-replay"])
 pages_router = APIRouter(include_in_schema=False, tags=["public-pages"])
@@ -148,6 +162,101 @@ def get_public_game_pgn(
 
 
 # ---------------------------------------------------------------------------
+# Live match status (P4.3 v1) — unverified runtime data, read-only.
+# ---------------------------------------------------------------------------
+def _current_pair(t: Tournament):
+    """The pair that is executing right now (status RUNNING), else the most
+    recently started pair that already has a run directory."""
+    running = [
+        p for p in t.pair_jobs if p.status == RUNNING and p.run_directory
+    ]
+    if running:
+        return max(running, key=lambda p: p.started_at or datetime.min)
+    started = [p for p in t.pair_jobs if p.run_directory and p.started_at]
+    if started:
+        return max(started, key=lambda p: p.started_at or datetime.min)
+    return None
+
+
+def _live_payload(session: Session, settings, t: Tournament) -> dict:
+    """Build the LiveOut payload for a single tournament."""
+    base = {
+        "tournament_id": t.id,
+        "name": t.name,
+        "engine_a_label": _engine_label(
+            session, t.engine_a_preset_id, t.engine_a_build_id, t.engine_a_profile
+        ),
+        "engine_b_label": _engine_label(
+            session, t.engine_b_preset_id, t.engine_b_build_id, t.engine_b_profile
+        ),
+        "time_control": t.time_control,
+        "opening_set_id": t.opening_set_id,
+        "pairs_total": t.requested_pairs,
+        "candidate_wins": t.candidate_wins,
+        "candidate_losses": t.candidate_losses,
+        "draws": t.draws,
+    }
+    if t.status == COMPLETED:
+        return {
+            **base,
+            "status": "completed",
+            "match_url": f"{settings.base_path}/matches/{t.id}",
+        }
+
+    pair = _current_pair(t)
+    if pair and pair.run_directory and Path(pair.run_directory).is_dir():
+        run_dir = Path(pair.run_directory)
+        runtime = derive_runtime_status(run_dir, total_games=2)
+        opening_fen = None
+        op = run_dir / "opening.epd"
+        if op.is_file():
+            opening_fen = op.read_text(encoding="utf-8").strip() or None
+        return {
+            **base,
+            "status": "live",
+            "pair_index": pair.pair_index,
+            "game_in_pair": runtime.get("game_in_pair"),
+            "games_total": runtime.get("total_games"),
+            "state": runtime.get("state"),
+            "last_result": runtime.get("last_result"),
+            "opening_fen": opening_fen,
+        }
+    return {**base, "status": "live"}
+
+
+@router.get("/live", response_model=LiveOut)
+def get_live_status(
+    tournament_id: Optional[str] = None,
+    session: Session = Depends(get_db),
+    settings=Depends(get_settings),
+):
+    """Current live match status for the watched (or auto-detected) match.
+
+    Pass ``tournament_id`` to pin a specific match; otherwise the most recently
+    started queued/running match is reported.  Returns ``idle`` when there is
+    nothing running.
+    """
+    if tournament_id:
+        t = (
+            session.query(Tournament)
+            .filter(Tournament.id == tournament_id)
+            .first()
+        )
+        if t is None:
+            return LiveOut(status="idle")
+        return LiveOut(**_live_payload(session, settings, t))
+    t = (
+        session.query(Tournament)
+        .filter(Tournament.status.in_([QUEUED, RUNNING]))
+        .order_by(Tournament.started_at.desc())
+        .first()
+    )
+    if t is None:
+        return LiveOut(status="idle")
+    return LiveOut(**_live_payload(session, settings, t))
+
+
+# ---------------------------------------------------------------------------
 # Public HTML pages
 # ---------------------------------------------------------------------------
 def _render(request: Request, template: str, **ctx):
@@ -174,6 +283,31 @@ def public_home(request: Request, session: Session = Depends(get_db)):
         "public_home.html",
         settings=request.app.state.settings,
         matches=_recent_matches(session, limit=12),
+    )
+
+
+@pages_router.get("/live")
+def public_live(
+    request: Request,
+    tournament_id: Optional[str] = None,
+    session: Session = Depends(get_db),
+):
+    """Live match status page (P4.3 v1).  The React bundle runs in ``live``
+    mode, polling the public /live JSON endpoint every couple of seconds."""
+    pinned = tournament_id
+    if pinned is not None:
+        t = (
+            session.query(Tournament)
+            .filter(Tournament.id == pinned)
+            .first()
+        )
+        if t is None:
+            raise HTTPException(status_code=404, detail="match not found")
+    return _render(
+        request,
+        "public_live.html",
+        settings=request.app.state.settings,
+        tournament_id=pinned,
     )
 
 

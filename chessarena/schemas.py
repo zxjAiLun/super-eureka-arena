@@ -182,3 +182,34 @@ class PublicMatchOut(BaseModel):
 
 class PublicMatchDetailOut(PublicMatchOut):
     games: List[PublicGameOut] = Field(default_factory=list)
+
+
+class LiveOut(BaseModel):
+    """Live match status (P4.3 v1).  Only whitelisted display fields; never
+    exposes build ids, binary SHAs, paths, logs or provenance.
+
+    ``status`` is one of:
+      idle       no current match to watch
+      live       a match is queued/running; opening/pair/game fields populated
+      completed  the watched match finished; ``match_url`` links to the replay
+    """
+
+    status: str
+    tournament_id: Optional[str] = None
+    name: Optional[str] = None
+    engine_a_label: Optional[str] = None
+    engine_b_label: Optional[str] = None
+    time_control: Optional[str] = None
+    opening_set_id: Optional[str] = None
+    pairs_total: Optional[int] = None
+    # Current executing pair (0-based) and game (1-based).
+    pair_index: Optional[int] = None
+    game_in_pair: Optional[int] = None
+    games_total: Optional[int] = None
+    state: Optional[str] = None  # pending | game_running | pair_done
+    last_result: Optional[str] = None
+    opening_fen: Optional[str] = None
+    candidate_wins: Optional[int] = None
+    candidate_losses: Optional[int] = None
+    draws: Optional[int] = None
+    match_url: Optional[str] = None
