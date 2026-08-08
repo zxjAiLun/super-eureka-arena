@@ -94,3 +94,25 @@ Then open `http://127.0.0.1:8787/chessarena/admin/`.
 python -m chessarena.admin disk-usage
 python -m chessarena.admin archive-tournament <tournament_id>   # tar.zst
 ```
+
+## Repository split
+
+This repository is ChessArena's control-plane only (extracted from the
+ChessEngine source repository at `0fd42e0`+).  The engine is consumed as an
+immutable artifact, never checked out/built from here.
+
+```
+Engine repo (super-eureka)
+        │  publish immutable EngineArtifact
+        ▼
+Arena registry  →  EngineBuild (SHA-pinned)  →  EnginePreset  →  Tournament
+        ▼
+    CuteChess
+```
+
+`scripts/install_external_build.py` registers a build from a binary +
+manifest; `scripts/register_openings.py --catalog opening-books/catalog.json
+--book-id <id>` registers official book suites from the pinned catalog.
+Download/prepare books with `python opening-books/prepare_books.py`.
+
+Arena never runs Rust tooling; the Engine repo never runs Chromium/pytest.
