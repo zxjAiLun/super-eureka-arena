@@ -73,11 +73,25 @@ def replay_legal(game: chess.pgn.Game) -> None:
         board.push(move)
 
 
+def position_part(fen: str) -> str:
+    """Position-only FEN key: placement, side to move, castling, ep square.
+
+    Real cutechess writes the opening position into the game's ``[FEN]``
+    header but resets the halfmove-clock / fullmove-number counters to their
+    standard-start values (``0 1``), so the recorded position and the one we
+    replayed from the book differ only in those two trailing fields.  Comparing
+    just the positional part keeps the opening-identity check strict (any
+    piece, side-to-move, castling or en-passant difference still fails) without
+    false positives on move counters that cutechess does not preserve.
+    """
+    return " ".join(fen.split(" ")[:4])
+
+
 def position_key(game: chess.pgn.Game) -> str:
-    """Normalized FEN used to compare openings across the two games."""
+    """Normalized position key used to compare openings across the two games."""
     fen = game.headers.get("FEN")
     board = chess.Board(fen) if fen else chess.Board()
-    return board.fen()
+    return position_part(board.fen())
 
 
 def parse_score_line(stdout_lines: List[str]) -> Dict[str, int] | None:
@@ -182,7 +196,7 @@ def verify_pair(
         )
     except Exception as exc:
         raise VerificationFailure(str(exc)) from exc
-    if key1 != expected_fen:
+    if key1 != position_part(expected_fen):
         raise VerificationFailure(
             f"opening position mismatch: pair used {key1}, registered line is "
             f"{expected_fen}"

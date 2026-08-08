@@ -186,6 +186,7 @@ def _write_pgn(path: Path, engine_a: str, engine_b: str, fen: str, tc: str,
     wrong_tc = ENV.get("FAKE_CUTECHESS_TC_WRONG") == "1"
 
     parts: list[str] = []
+    reset_clocks = ENV.get("FAKE_CUTECHESS_RESET_FEN_CLOCKS") == "1"
     for idx, result in enumerate(results):
         if same_colors:
             white, black = engine_a, engine_b
@@ -194,6 +195,14 @@ def _write_pgn(path: Path, engine_a: str, engine_b: str, fen: str, tc: str,
         else:
             white, black = engine_b, engine_a
         game_fen = fen
+        if reset_clocks:
+            # Real cutechess preserves the opening position but resets the
+            # halfmove-clock / fullmove counters to standard start (0 1) in
+            # the [FEN] header, so the recorded position differs from the
+            # book FEN only in those two trailing fields.
+            board = chess.Board(fen)
+            placement = board.fen().split(" ")[:4]
+            game_fen = " ".join(placement + ["0", "1"])
         if different_opening and idx >= 1:
             # A distinct but legal position (different move counters).
             game_fen = chess.Board(fen).fen().replace(" - 0 1", " - 3 5")

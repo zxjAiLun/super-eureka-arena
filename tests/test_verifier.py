@@ -75,6 +75,25 @@ def test_valid_pair_passes(settings, engine_factory, pair_context, pair_run):
     assert verification["cutechess_score_line"] == {"wins": 2, "losses": 0, "draws": 0}
 
 
+def test_valid_pair_passes_with_reset_fen_clocks(
+    settings, engine_factory, pair_context
+):
+    """Real cutechess resets the [FEN] header move counters to 0 1 even when
+    the game starts from a mid-game book position; that clock-only difference
+    must NOT fail the opening-position identity check."""
+    run_dir = helpers.run_fake_pair(
+        settings,
+        tournament=pair_context["tournament"],
+        pair_job=pair_context["pair"],
+        engine_a_build=pair_context["engine_a"],
+        engine_b_build=pair_context["engine_b"],
+        opening_set=pair_context["opening_set"],
+        env_extra={"FAKE_CUTECHESS_RESET_FEN_CLOCKS": "1"},
+    )
+    verification = _verify(settings, engine_factory, pair_context, run_dir)
+    assert verification["verified"] is True
+
+
 # ---------------------------------------------------------------------------
 # Failure matrix
 # ---------------------------------------------------------------------------
