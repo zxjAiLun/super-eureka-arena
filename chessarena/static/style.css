@@ -82,3 +82,16 @@ dd { margin: 0; }
 .match-table th, .match-table td { white-space: nowrap; }
 .match-table a { color: var(--accent); }
 .match-meta th { width: 160px; }
+
+/* P4.4 result summary */
+.result-summary .result-grid {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: 0.2rem 1rem;
+  margin: 0.2rem 0 0.6rem;
+}
+.result-summary dt { color: var(--muted); }
+.result-summary dd { margin: 0; }
+.result-summary .actions, .actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.4rem; }
+.action-link { color: var(--accent); text-decoration: none; }
+.action-link:hover { text-decoration: underline; }

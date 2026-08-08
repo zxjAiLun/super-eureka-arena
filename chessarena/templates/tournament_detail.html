@@ -9,6 +9,25 @@
   {% include "_tournament_status.html" %}
 </div>
 
+{% if tournament.status == "COMPLETED" %}
+<section class="panel result-summary">
+  <h3>Result</h3>
+  <dl class="result-grid">
+    <dt>Matchup</dt><dd>{{ tournament.engine_a_preset_id or "—" }} vs {{ tournament.engine_b_preset_id or "—" }}</dd>
+    <dt>W / L / D</dt><dd>{{ tournament.candidate_wins }} / {{ tournament.candidate_losses }} / {{ tournament.draws }}</dd>
+    <dt>Score</dt><dd>{{ score_percent if score_percent is not none else "—" }}%</dd>
+    <dt>Games</dt><dd>{{ tournament.candidate_wins + tournament.candidate_losses + tournament.draws }}</dd>
+    <dt>Pairs</dt><dd>{{ tournament.completed_pairs }} / {{ tournament.requested_pairs }}</dd>
+    <dt>Time control</dt><dd>{{ tournament.time_control }}</dd>
+    <dt>Opening</dt><dd>{{ tournament.opening_set_id }}{% if opening_plies is not none %} &middot; {{ opening_plies }} ply{% endif %}</dd>
+  </dl>
+  <p class="actions">
+    <a class="action-link" href="{{ settings.base_path }}/matches/{{ tournament.id }}">Replay games</a>
+    <a class="action-link" href="{{ run_again }}">Run again</a>
+  </p>
+</section>
+{% endif %}
+
 <section class="panel">
   <h3>Controls</h3>
   {% if tournament.status == "DRAFT" %}

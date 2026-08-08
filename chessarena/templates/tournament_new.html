@@ -14,7 +14,7 @@
     <select name="engine_a_preset" required>
       {% for p in presets %}
         <option value="{{ p.preset_id }}"
-          {% if p.preset_id == "chessengine-production" %}selected{% endif %}>
+          {% if p.preset_id == (defaults.engine_a_preset or "chessengine-production") %}selected{% endif %}>
           {{ p.display_name }} ({{ p.build_id }})
         </option>
       {% endfor %}
@@ -26,7 +26,7 @@
     <select name="engine_b_preset" required>
       {% for p in presets %}
         <option value="{{ p.preset_id }}"
-          {% if p.preset_id == "chessengine-legacy-current" %}selected{% endif %}>
+          {% if p.preset_id == (defaults.engine_b_preset or "chessengine-legacy-current") %}selected{% endif %}>
           {{ p.display_name }} ({{ p.build_id }})
         </option>
       {% endfor %}
@@ -45,12 +45,15 @@
   <label>Opening set
     <select name="opening_set_id" required>
       {% for o in openings %}
-        <option value="{{ o.opening_set_id }}">{{ o.opening_set_id }} ({{ o.position_count }} positions)</option>
+        <option value="{{ o.opening_set_id }}"
+          {% if o.opening_set_id == (defaults.opening_set_id or "stockfish-8moves-v3") %}selected{% endif %}>
+          {{ o.opening_set_id }} ({{ o.position_count }} positions)
+        </option>
       {% endfor %}
     </select>
   </label>
   <label>Opening plies <span class="muted">(PGN books only — 16 plies = 8 full moves, 12 plies = 6 full moves)</span>
-    <input type="number" name="opening_plies" min="1" placeholder="16 (book default)">
+    <input type="number" name="opening_plies" min="1" value="{{ defaults.opening_plies }}" placeholder="16 (book default)">
   </label>
   <label>Opening seed <span class="muted">(optional — deterministic reproducible selection)</span>
     <input type="number" name="opening_seed" min="0" placeholder="random">
@@ -58,12 +61,13 @@
   <label>Time control
     <select name="time_control" required>
       {% for key, tc in time_controls.items() %}
-        <option value="{{ key }}">{{ tc.label }} ({{ tc.cutechess_tc }})</option>
+        <option value="{{ key }}"
+          {% if key == (defaults.time_control or "blitz_3_2") %}selected{% endif %}>{{ tc.label }} ({{ tc.cutechess_tc }})</option>
       {% endfor %}
     </select>
   </label>
   <label>Pairs (each pair = 2 games, strict color swap)
-    <input type="number" name="pairs" min="1" value="10" required>
+    <input type="number" name="pairs" min="1" value="{{ defaults.pairs or 10 }}" required>
   </label>
 
   <button type="submit">Create match</button>

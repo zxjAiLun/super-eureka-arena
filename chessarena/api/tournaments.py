@@ -7,6 +7,7 @@ nothing accepts raw paths or arbitrary cutechess parameters.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import json
 from pathlib import Path
 import random
 from typing import Optional
@@ -679,13 +680,70 @@ def admin_dashboard(request: Request, session: Session = Depends(get_db)):
     )
 
 
+# ---------------------------------------------------------------------------
+# P4.4 Fast Match Workflow: "last used" prefs + prefill for Run again.
+# ---------------------------------------------------------------------------
+def _prefs_path(settings: Settings) -> Path:
+    return settings.run_root.parent / "state" / "match_prefs.json"
+
+
+def _load_match_prefs(settings: Settings) -> dict:
+    path = _prefs_path(settings)
+    if not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_match_prefs(settings: Settings, prefs: dict) -> None:
+    path = _prefs_path(settings)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(prefs, indent=2) + "\n", encoding="utf-8")
+    except OSError:
+        # Best-effort: never fail match creation because prefs could not persist.
+        pass
+
+
+DEFAULT_OPENING = "stockfish-8moves-v3"
+
+
+def _new_match_defaults(session, settings, query: dict) -> dict:
+    """Resolve form defaults with precedence: Run-again query params >
+    last-used prefs > built-in defaults."""
+    prefs = _load_match_prefs(settings)
+    enabled_openings = {
+        o.opening_set_id
+        for o in session.query(OpeningSet).filter(OpeningSet.enabled.is_(True))
+    }
+    opening = (
+        query.get("opening_set_id")
+        or prefs.get("opening_set_id")
+        or (DEFAULT_OPENING if DEFAULT_OPENING in enabled_openings else None)
+    )
+    return {
+        "engine_a_preset": query.get("engine_a_preset") or prefs.get("engine_a_preset"),
+        "engine_b_preset": query.get("engine_b_preset") or prefs.get("engine_b_preset"),
+        "opening_set_id": opening,
+        "opening_plies": query.get("opening_plies")
+        or prefs.get("opening_plies")
+        or "16",
+        "time_control": query.get("time_control")
+        or prefs.get("time_control")
+        or "blitz_3_2",
+        "pairs": query.get("pairs") or prefs.get("pairs") or "10",
+    }
+
+
 @admin_router.get("/admin/tournaments/new", response_class=HTMLResponse)
 def admin_tournament_new(request: Request, session: Session = Depends(get_db)):
     templates = request.app.state.templates
     presets = (
         session.query(EnginePreset)
         .filter(EnginePreset.enabled.is_(True))
-        .order_by(EnginePreset.category, EnginePreset.created_at.desc())
+        .order_by(EnginePreset.created_at.desc())
         .all()
     )
     openings = (
@@ -694,6 +752,7 @@ def admin_tournament_new(request: Request, session: Session = Depends(get_db)):
         .order_by(OpeningSet.created_at.desc())
         .all()
     )
+    defaults = _new_match_defaults(session, request.app.state.settings, dict(request.query_params))
     return templates.TemplateResponse(
         request,
         "tournament_new.html",
@@ -701,6 +760,7 @@ def admin_tournament_new(request: Request, session: Session = Depends(get_db)):
             "presets": presets,
             "openings": openings,
             "time_controls": TIME_CONTROLS,
+            "defaults": defaults,
             "settings": request.app.state.settings,
         },
     )
@@ -732,6 +792,19 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
     # Reuse the API creation logic by calling it directly.
     created = create_tournament(body, session, request.app.state.settings)
     session.flush()
+    # Remember the last-used match parameters so the next "new match" form is
+    # prefilled (P4.4 Fast Match Workflow).
+    _save_match_prefs(
+        request.app.state.settings,
+        {
+            "engine_a_preset": form["engine_a_preset"],
+            "engine_b_preset": form["engine_b_preset"],
+            "opening_set_id": form["opening_set_id"],
+            "opening_plies": form.get("opening_plies") or "",
+            "time_control": form["time_control"],
+            "pairs": form["pairs"],
+        },
+    )
     return RedirectResponse(
         url=f"{request.app.state.settings.base_path}/admin/tournaments/{created['id']}",
         status_code=303,
@@ -771,6 +844,19 @@ def admin_tournament_detail(
             runtime[p.id] = derive_runtime_status(
                 Path(p.run_directory), total_games=2
             )
+    snap = tournament.config_snapshot or {}
+    opening_snap = snap.get("opening_set") or {}
+    opening_plies = opening_snap.get("plies")
+    bp = request.app.state.settings.base_path
+    run_again = (
+        f"{bp}/admin/tournaments/new?"
+        f"engine_a_preset={tournament.engine_a_preset_id or ''}"
+        f"&engine_b_preset={tournament.engine_b_preset_id or ''}"
+        f"&opening_set_id={tournament.opening_set_id}"
+        f"&opening_plies={opening_plies or ''}"
+        f"&time_control={tournament.time_control}"
+        f"&pairs={tournament.requested_pairs}"
+    )
     return templates.TemplateResponse(
         request,
         "tournament_detail.html",
@@ -781,6 +867,8 @@ def admin_tournament_detail(
             "games": games,
             "events": events,
             "score_percent": _score_percent(tournament),
+            "opening_plies": opening_plies,
+            "run_again": run_again,
             "has_combined": has_combined,
             "has_summary": has_summary,
             "has_manifest": has_manifest,
