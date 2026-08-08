@@ -1,6 +1,6 @@
 """Browser E2E for the modern React replay demo (P4.UI-1).
 
-Starts a real uvicorn server, opens /chessarena/demo/games/{id} in Chromium
+Starts a real uvicorn server, opens /chessarena/games/{id} in Chromium
 and asserts the React island actually works: board mounted, initial
 position correct, PGN move count, clicking a ply sets the right FEN,
 first/prev/next/last, keyboard navigation, metadata badges, mobile
@@ -215,7 +215,7 @@ def test_browser_demo_replay(settings, engine_factory, registered):
     )
     base = f"http://127.0.0.1:{port}/chessarena"
     try:
-        _wait_until_up(f"{base}/demo/games/{gid}")
+        _wait_until_up(f"{base}/games/{gid}")
 
         from playwright.sync_api import sync_playwright
 
@@ -232,7 +232,7 @@ def test_browser_demo_replay(settings, engine_factory, registered):
             page.on("pageerror", lambda exc: console_errors.append(str(exc)))
 
             resp = page.goto(
-                f"{base}/demo/games/{gid}", wait_until="networkidle"
+                f"{base}/games/{gid}", wait_until="networkidle"
             )
             assert resp.status == 200
             page.wait_for_timeout(600)
@@ -407,7 +407,7 @@ def test_browser_demo_replay_from_fen_header(settings, engine_factory, registere
     )
     base = f"http://127.0.0.1:{port}/chessarena"
     try:
-        _wait_until_up(f"{base}/demo/games/{gid}")
+        _wait_until_up(f"{base}/games/{gid}")
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
@@ -423,7 +423,7 @@ def test_browser_demo_replay_from_fen_header(settings, engine_factory, registere
             page.on("pageerror", lambda exc: console_errors.append(str(exc)))
 
             resp = page.goto(
-                f"{base}/demo/games/{gid}", wait_until="networkidle"
+                f"{base}/games/{gid}", wait_until="networkidle"
             )
             assert resp.status == 200
             page.wait_for_timeout(600)
@@ -539,7 +539,7 @@ def test_browser_demo_long_game_active_move_scrolls_into_view(
     )
     base = f"http://127.0.0.1:{port}/chessarena"
     try:
-        _wait_until_up(f"{base}/demo/games/{gid}")
+        _wait_until_up(f"{base}/games/{gid}")
         from playwright.sync_api import sync_playwright
 
         with sync_playwright() as p:
@@ -555,7 +555,7 @@ def test_browser_demo_long_game_active_move_scrolls_into_view(
             page.on("pageerror", lambda exc: console_errors.append(str(exc)))
 
             resp = page.goto(
-                f"{base}/demo/games/{gid}", wait_until="networkidle"
+                f"{base}/games/{gid}", wait_until="networkidle"
             )
             assert resp.status == 200
             page.wait_for_timeout(600)

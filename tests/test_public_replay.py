@@ -129,32 +129,30 @@ def test_anonymous_pages_render(app_client, completed_match):
     assert "Game" in r.text
     r = app_client.get(f"/chessarena/games/{gid1}")
     assert r.status_code == 200
-    assert "pgn-viewer" in r.text
+    assert 'id="replay-root"' in r.text
 
 
-def test_anonymous_demo_page_render(app_client, completed_match):
-    """P4.UI-1: the demo page mounts the React root and references the
-    committed replay-app build output (production fallback page untouched)."""
+def test_game_page_renders_react(app_client, completed_match):
+    """The official /games/{id} replay mounts the React bundle and references
+    the committed replay-app build output (no Lichess pgn-viewer)."""
     tid, gid1, gid2 = completed_match
-    r = app_client.get(f"/chessarena/demo/games/{gid1}")
+    r = app_client.get(f"/chessarena/games/{gid1}")
     assert r.status_code == 200
     assert 'id="replay-root"' in r.text
     assert f"data-game-id=\"{gid1}\"" in r.text
     assert "/static/replay-app/assets/index-" in r.text
-    # The production fallback page is untouched.
-    r2 = app_client.get(f"/chessarena/games/{gid1}")
-    assert r2.status_code == 200
-    assert "pgn-viewer" in r2.text
+    assert "pgn-viewer" not in r.text
+    assert "lichess-pgn-viewer" not in r.text
 
 
-def test_demo_page_404s(app_client, completed_match, settings, engine_factory,
+def test_game_page_404s(app_client, completed_match, settings, engine_factory,
                         tournament_factory):
     _, gid1, _ = completed_match
     assert (
-        app_client.get("/chessarena/demo/games/not-a-real-id").status_code
+        app_client.get("/chessarena/games/not-a-real-id").status_code
         == 404
     )
-    # A game in a DRAFT tournament must not be reachable via the demo route.
+    # A game in a DRAFT tournament must not be reachable.
     tid = tournament_factory(name="Draft", pairs=1, status=DRAFT)
     with engine_factory() as session:
         t = session.query(Tournament).filter(Tournament.id == tid).one()
@@ -179,7 +177,7 @@ def test_demo_page_404s(app_client, completed_match, settings, engine_factory,
         session.refresh(g)
         draft_gid = g.id
     assert (
-        app_client.get(f"/chessarena/demo/games/{draft_gid}").status_code
+        app_client.get(f"/chessarena/games/{draft_gid}").status_code
         == 404
     )
 

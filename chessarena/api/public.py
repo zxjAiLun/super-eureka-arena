@@ -359,41 +359,10 @@ def public_game(
     request: Request,
     session: Session = Depends(get_db),
 ):
-    game = session.query(Game).filter(Game.id == game_id).first()
-    if game is None or not game.verified:
-        raise HTTPException(status_code=404, detail="game not found")
-    tournament = (
-        session.query(Tournament)
-        .filter(Tournament.id == game.tournament_id)
-        .first()
-    )
-    if tournament is None or tournament.status != COMPLETED:
-        raise HTTPException(status_code=404, detail="game not found")
-    try:
-        pgn_text = read_single_game_pgn(game)
-    except ReplayError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    return _render(
-        request,
-        "public_game.html",
-        settings=request.app.state.settings,
-        game=game,
-        pgn_text=pgn_text,
-    )
+    """Official game replay page (React + react-chessboard + chess.js).
 
-
-@pages_router.get("/demo/games/{game_id}")
-def public_game_demo(
-    game_id: str,
-    request: Request,
-    session: Session = Depends(get_db),
-):
-    """Modern React replay demo (P4.UI-1).
-
-    Read-only island: the template only mounts the replay root; the React
-    app fetches the same public match-detail + PGN APIs the production
-    fallback page uses.  The existing /games/{id} Lichess viewer page stays
-    untouched as the production surface.
+    The template only mounts the replay root; the React app fetches the public
+    match-detail and PGN APIs.
     """
     game = session.query(Game).filter(Game.id == game_id).first()
     if game is None or not game.verified:
@@ -408,7 +377,7 @@ def public_game_demo(
     pair_index = game.pair_job.pair_index if game.pair_job else 0
     return _render(
         request,
-        "public_game_demo.html",
+        "public_game.html",
         settings=request.app.state.settings,
         game=game,
         tournament_id=game.tournament_id,

@@ -228,14 +228,6 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           >
             Download PGN
           </a>
-          <a
-            href={`https://lichess.org/paste?pgn=${encodeURIComponent(pgn)}`}
-            target="_blank"
-            rel="noreferrer"
-            className="action-link"
-          >
-            Import into Lichess
-          </a>
         </div>
 
         <div className="demo-note">{matchName}</div>
