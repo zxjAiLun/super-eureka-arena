@@ -148,7 +148,10 @@ export default function LiveApp({ tournamentId, basePath }) {
     payload.state === "game_running" || payload.state === "pending";
   const white = payload.white;
   const black = payload.black;
-  const hasTelemetry = Boolean(payload.current_fen && white && black);
+  // Fail closed: without an authoritative game boundary the backend sends no
+  // white/black sides — never guess engine A/B into the colors here.
+  const sidesKnown = Boolean(white && black);
+  const hasTelemetry = Boolean(payload.current_fen);
   const activeIsWhite = payload.side_to_move === "w";
 
   const clockOf = (side, isActive) => {
@@ -199,7 +202,7 @@ export default function LiveApp({ tournamentId, basePath }) {
       <div className="replay-board-col">
         <div className="player-card top">
           <span className="color-dot black" />
-          <span className="player-name">{black ? black.label : payload.engine_b_label}</span>
+          <span className="player-name">{black ? black.label : "—"}</span>
           {clockOf(black, hasTelemetry && !activeIsWhite) && (
             <span className="live-clock">{clockOf(black, hasTelemetry && !activeIsWhite)}</span>
           )}
@@ -208,7 +211,7 @@ export default function LiveApp({ tournamentId, basePath }) {
           <Chessboard options={{ position: fen, allowDragging: false }} />
         </div>
         <div className="player-card bottom">
-          <span className="player-name">{white ? white.label : payload.engine_a_label}</span>
+          <span className="player-name">{white ? white.label : "—"}</span>
           {clockOf(white, hasTelemetry && activeIsWhite) && (
             <span className="live-clock">{clockOf(white, hasTelemetry && activeIsWhite)}</span>
           )}
@@ -233,6 +236,12 @@ export default function LiveApp({ tournamentId, basePath }) {
             {enginePanel(white)}
             {enginePanel(black)}
           </>
+        )}
+        {hasTelemetry && !sidesKnown && (
+          <p className="demo-note">
+            Live position from the engine stream; color assignment unavailable
+            until the next authoritative game boundary.
+          </p>
         )}
         <p className="demo-note">
           {hasTelemetry

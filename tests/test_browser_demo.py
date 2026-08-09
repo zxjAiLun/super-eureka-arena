@@ -1461,6 +1461,32 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
                 f"got {page.evaluate('window.__goCount')}"
             )
 
+            # P2 regression: the engine version must survive a FEN change
+            # (each navigation used to replace the whole state, dropping it).
+            engine_label_after = page.locator(".analysis-engine").inner_text()
+            assert engine_label_after == engine_label, (
+                f"version label lost after navigation: {engine_label!r} -> "
+                f"{engine_label_after!r}"
+            )
+
+            # P1 regression: fast A -> B -> A must re-serve A as a NEW
+            # generation and re-show its score (never stall in "searching").
+            page.keyboard.press("ArrowLeft")
+            page.wait_for_timeout(500)
+            assert page.locator(".analysis-panel").count() == 1
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && !el.innerText.startsWith('\u2026');
+                }""",
+                timeout=30000,
+            )
+            assert page.evaluate("window.__goCount") == 3, (
+                "A -> B -> A must start a third search (one per FEN), "
+                f"got {page.evaluate('window.__goCount')}"
+            )
+            assert page.locator(".analysis-engine").inner_text() == engine_label
+
             assert not console_errors, f"browser console errors: {console_errors}"
 
             # P2 regression: a worker that fails to load surfaces a visible
@@ -1479,6 +1505,165 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             )
             bad_page.close()
 
+            # P2 regression: a worker that loads but NEVER answers "uci"
+            # (hung init, no error event) must still surface the unavailable
+            # state after the init timeout — not search forever.
+            hung_page = browser.new_page()
+            hung_errors: list[str] = []
+            hung_page.on("pageerror", lambda exc: hung_errors.append(str(exc)))
+            hung_page.route(
+                "**/stockfish.wasm.js",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/javascript",
+                    body="// deliberately silent worker stub",
+                ),
+            )
+            hung_page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
+            hung_panel = hung_page.locator(".analysis-panel")
+            # The panel shows "searching" right away; the init timeout must
+            # flip it to the unavailable state ~10s later.
+            hung_panel.wait_for(state="visible", timeout=20000)
+            hung_page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-panel');
+                    return el && el.innerText.includes('unavailable');
+                }""",
+                timeout=25000,
+            )
+            assert "unavailable" in hung_panel.inner_text().lower(), (
+                f"hung worker must show 'Stockfish unavailable', "
+                f"got {hung_panel.inner_text()!r}"
+            )
+            hung_page.close()
+
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_browser_live_fails_closed_without_colors(
+    settings, engine_factory, registered
+):
+    """P4.11 closure repair: when the backend has no authoritative game
+    boundary (no Started game line) it sends white/black = null, and the Live
+    page must NOT guess engine A/B back into the player cards."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    from chessarena.models import RUNNING, Tournament, utcnow
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="live-failclosed",
+            status=RUNNING,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=1,
+            config_snapshot={
+                "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        tournament.started_at = utcnow()
+        from chessarena.models import PairJob
+
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status=RUNNING,
+        )
+        session.add(pair)
+        session.flush()
+        run_dir = settings.run_root / tournament.id / "pairs" / "000000" / "attempt-01"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        opening = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+        (run_dir / "opening.epd").write_text(opening + "\n", encoding="utf-8")
+        # A debug stream WITHOUT any "Started game N" boundary line: the
+        # backend must fail closed (white/black null).
+        (run_dir / "stdout.log").write_text(
+            f"4 >EngineA(0): position fen {opening}\n"
+            "6 >EngineA(0): go wtime 180000 btime 180000 winc 2000 binc 2000\n"
+            "8 <EngineA(0): info depth 10 score cp 99 nodes 100 nps 1000 time 5 pv d2d4\n",
+            encoding="utf-8",
+        )
+        pair.run_directory = str(run_dir)
+        session.commit()
+        tid = tournament.id
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/live?tournament_id={tid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+            page.goto(f"{base}/live?tournament_id={tid}", wait_until="domcontentloaded")
+            top_name = page.locator(".player-card.top .player-name")
+            top_name.wait_for(state="visible", timeout=20000)
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.player-card.top .player-name');
+                    return el && el.innerText === '\u2014';
+                }""",
+                timeout=20000,
+            )
+            # Player cards must NOT be filled with guessed engine names.
+            assert top_name.inner_text() == "—"
+            assert (
+                page.locator(".player-card.bottom .player-name").inner_text()
+                == "—"
+            )
+            body_text = page.locator("body").inner_text()
+            assert "color assignment unavailable" in body_text.lower(), (
+                f"expected the fail-closed note, got {body_text[:200]!r}"
+            )
+            # The engine names exist only in the badges, not the cards.
+            cards = " ".join(page.locator(".player-card").all_inner_texts())
+            assert "EngineA" not in cards and "EngineB" not in cards
+            assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()
     finally:
         proc.terminate()
