@@ -30,8 +30,16 @@ def main() -> int:
     parser.add_argument("--preset-id", required=True)
     parser.add_argument("--display-name", required=True)
     parser.add_argument("--command-args", nargs="+", default=[])
+    parser.add_argument(
+        "--profile",
+        help="shortcut for --command-args --profile <name> (project engines)",
+    )
     parser.add_argument("--uci-option", action="append", default=[])
     args = parser.parse_args()
+
+    command_args = list(args.command_args)
+    if args.profile:
+        command_args = ["--profile", args.profile]
 
     uci_options: dict = {}
     for spec in args.uci_option:
@@ -68,7 +76,7 @@ def main() -> int:
                 preset_id=args.preset_id,
                 build_id=build.build_id,
                 display_name=args.display_name,
-                command_args=list(args.command_args),
+                command_args=command_args,
                 uci_options=uci_options,
                 category="custom",
                 public_visible=True,
@@ -79,7 +87,7 @@ def main() -> int:
         else:
             preset.build_id = build.build_id
             preset.display_name = args.display_name
-            preset.command_args = list(args.command_args)
+            preset.command_args = command_args
             preset.uci_options = uci_options
             preset.enabled = True
             verb = "updated"
