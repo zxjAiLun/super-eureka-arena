@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · Arena Elo{% endblock %}
+{% block content %}
+<h1>Arena Elo</h1>
+<p class="muted">
+  Anchor-calibrated ratings: Stockfish Limited (UCI_Elo) is a fixed anchor,
+  engine ratings are recomputed from rated match history. Not FIDE/CCRL/human
+  Elo — a rough relative scale for your engines.
+</p>
+
+<div class="tabs">
+  {% for key, tc in pools.items() %}
+    <a class="tab {% if key == selected_tc %}active{% endif %}"
+       href="{{ settings.base_path }}/admin/ratings?tc={{ key }}">{{ tc.label }}</a>
+  {% endfor %}
+</div>
+
+{% if ratings.engines %}
+<table class="match-table">
+  <thead>
+    <tr><th>Engine</th><th>Arena Elo</th><th>Games</th></tr>
+  </thead>
+  <tbody>
+    {% for e in ratings.engines %}
+    <tr>
+      <td>{{ e.display_name }}</td>
+      <td>
+        {% if e.rating is not none %}
+          {% if e.upper_bound %}&ge;{% elif e.lower_bound %}&le;{% endif %}{{ e.rating }}
+          {% if e.provisional %} <span class="status status-pending">provisional</span>{% endif %}
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+      <td>{{ e.games }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No rated matches in this pool yet. Check "Rated match" when creating a match against a Stockfish Limited opponent.</p>
+{% endif %}
+
+<h3>Fixed anchors</h3>
+<table class="match-table">
+  <thead><tr><th>Anchor</th><th>Arena Elo</th></tr></thead>
+  <tbody>
+    {% for a in ratings.anchors %}
+    <tr><td>{{ a.display_name }}</td><td>{{ a.rating }} (fixed)</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

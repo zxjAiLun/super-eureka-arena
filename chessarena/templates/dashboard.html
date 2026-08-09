@@ -3,6 +3,10 @@
 {% block content %}
 <h1>Dashboard</h1>
 
+<p>
+  <a class="action-link" href="{{ settings.base_path }}/admin/ratings">Arena Elo</a>
+</p>
+
 <section class="panel" id="worker-panel"
          {% if active %}
          hx-get="{{ settings.base_path }}/admin/tournaments/{{ active.id }}/status"

@@ -190,6 +190,11 @@ class Tournament(Base):
     candidate_wins: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     candidate_losses: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     draws: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # P4.8: explicit opt-in for Arena Elo.  Default False so smoke/UI matches
+    # never pollute ratings; flippable from the admin detail page.
+    arena_elo_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utcnow, nullable=False

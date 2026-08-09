@@ -89,6 +89,31 @@
 {% endif %}
 
 <section class="panel">
+  <h3>Arena Elo</h3>
+  {% if rated_elo %}
+    <p>
+      Current Arena Elo — {{ tournament.time_control }} pool:
+      <strong>{{ rated_elo.rating }}{% if rated_elo.upper_bound %}+{% elif rated_elo.lower_bound %}-{% endif %}</strong>
+      {% if rated_elo.provisional %}<span class="status status-pending">provisional</span>{% endif %}
+      ({{ rated_elo.games }} games)
+    </p>
+  {% else %}
+    <p class="muted">
+      {% if tournament.arena_elo_enabled %}No Arena Elo yet for this configuration in this pool.{% else %}This match does not count toward Arena Elo.{% endif %}
+    </p>
+  {% endif %}
+  {% if tournament.status == "COMPLETED" %}
+  <form method="post" action="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/rating-toggle" style="display:inline">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <button type="submit" class="linklike">
+      {% if tournament.arena_elo_enabled %}Exclude from Arena Elo{% else %}Include in Arena Elo{% endif %}
+    </button>
+  </form>
+  <a class="action-link" href="{{ settings.base_path }}/admin/ratings">Arena Elo leaderboard</a>
+  {% endif %}
+</section>
+
+<section class="panel">
   <h3>Configuration</h3>
   <dl>
     <dt>Engine A</dt><dd>{{ engine_a_label }} <span class="muted">({{ tournament.engine_a_build_id }} / {{ tournament.engine_a_profile }})</span></dd>

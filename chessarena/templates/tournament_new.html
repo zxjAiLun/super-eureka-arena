@@ -79,6 +79,10 @@
   <label>Pairs (each pair = 2 games, strict color swap)
     <input type="number" name="pairs" min="1" value="{{ defaults.pairs or 10 }}" required>
   </label>
+  <label>
+    <input type="checkbox" name="arena_elo_enabled">
+    Rated match <span class="muted">(counts toward Arena Elo — leave off for smoke/UI matches)</span>
+  </label>
 
   <button type="submit">Create match</button>
 </form>

@@ -402,6 +402,7 @@ def create_tournament(
         opening_set_id=opening.opening_set_id,
         time_control=body.time_control,
         requested_pairs=body.pairs,
+        arena_elo_enabled=body.arena_elo_enabled,
         config_snapshot=config_snapshot,
     )
     session.add(tournament)
@@ -890,6 +891,7 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
             if form.get("opening_seed")
             else None
         ),
+        arena_elo_enabled=form.get("arena_elo_enabled") == "on",
     )
     # Reuse the API creation logic by calling it directly.
     created = create_tournament(body, session, request.app.state.settings)
@@ -983,6 +985,10 @@ def admin_tournament_detail(
 
     game_analysis = {g.id: analysis_state(g) for g in games}
 
+    from ..services.ratings import engine_rating
+
+    rated_elo = engine_rating(session, tournament)
+
     return templates.TemplateResponse(
         request,
         "tournament_detail.html",
@@ -998,6 +1004,7 @@ def admin_tournament_detail(
             "engine_a_label": engine_a_label,
             "engine_b_label": engine_b_label,
             "game_analysis": game_analysis,
+            "rated_elo": rated_elo,
             "can_delete": tournament.status in DELETABLE_STATUSES,
             "has_combined": has_combined,
             "has_summary": has_summary,
@@ -1152,6 +1159,53 @@ async def admin_game_analyze(
             f"{game.tournament_id}"
         ),
         status_code=303,
+    )
+
+
+@admin_router.post("/admin/tournaments/{tournament_id}/rating-toggle",
+                   response_class=RedirectResponse)
+async def admin_tournament_rating_toggle(
+    request: Request,
+    tournament_id: str,
+    session: Session = Depends(get_db),
+):
+    """Flip the Rated-match opt-in for Arena Elo (P4.8).  Does not affect the
+    worker or the match result — only the ratings recomputation."""
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    t = _get_tournament_or_404(session, tournament_id)
+    t.arena_elo_enabled = not t.arena_elo_enabled
+    session.flush()
+    return RedirectResponse(
+        url=(
+            f"{request.app.state.settings.base_path}/admin/tournaments/"
+            f"{tournament_id}"
+        ),
+        status_code=303,
+    )
+
+
+@admin_router.get("/admin/ratings", response_class=HTMLResponse)
+def admin_ratings(
+    request: Request,
+    tc: str = "blitz_3_2",
+    session: Session = Depends(get_db),
+):
+    """Arena Elo leaderboard, recomputed from surviving rated history (P4.8)."""
+    from ..services.ratings import compute_ratings
+
+    all_ratings = compute_ratings(session)
+    pools = {key: val for key, val in TIME_CONTROLS.items()}
+    selected = tc if tc in pools else "blitz_3_2"
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "ratings.html",
+        {
+            "pools": pools,
+            "selected_tc": selected,
+            "ratings": all_ratings.get(selected, {"engines": [], "anchors": []}),
+            "settings": request.app.state.settings,
+        },
     )
 
 
