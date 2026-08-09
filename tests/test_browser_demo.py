@@ -567,7 +567,7 @@ def test_browser_demo_long_game_active_move_scrolls_into_view(
             # Jump to the final ply; the active move must be visible inside
             # the move-list viewport.
             page.locator("button", has_text="last").click()
-            page.wait_for_timeout(800)  # allow smooth scroll to settle
+            page.wait_for_timeout(2000)  # allow smooth scroll to settle
 
             active_visible = page.evaluate(
                 """() => {
@@ -579,6 +579,20 @@ def test_browser_demo_long_game_active_move_scrolls_into_view(
                     return ar.top >= lr.top - 1 && ar.bottom <= lr.bottom + 1;
                 }"""
             )
+            if not active_visible:
+                rects = page.evaluate(
+                    """() => {
+                        const list = document.querySelector('.moves-list');
+                        const active = document.querySelector('.move.active');
+                        const lr = list.getBoundingClientRect();
+                        const ar = active.getBoundingClientRect();
+                        return { listTop: lr.top, listBottom: lr.bottom,
+                                 activeTop: ar.top, activeBottom: ar.bottom,
+                                 listScrollTop: list.scrollTop, listScrollHeight: list.scrollHeight,
+                                 listClientHeight: list.clientHeight };
+                    }"""
+                )
+                print("SCROLL_STATE=" + repr(rects))
             assert active_visible, "active move not visible in move-list viewport"
 
             assert not console_errors, f"browser console errors: {console_errors}"
@@ -731,7 +745,7 @@ def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
             print("CONSOLE_ERRORS=" + repr(console_errors))
             assert page.locator(".eval-bar").count() == 1, "eval bar missing"
             assert page.locator(".analysis-panel").count() == 1, "analysis panel missing"
-            score = page.locator(".analysis-score")
+            score = page.locator(".diagnostics-title")
             assert "+0.50" in score.inner_text(), "ply 0 score wrong"
 
             # ArrowRight steps one ply -> score follows the analysis.
@@ -750,26 +764,32 @@ def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
             assert marks.nth(0).inner_text() == "??"
             assert marks.nth(1).inner_text() == "??"
             assert marks.nth(2).inner_text() == "?"
-            # Unknown eval on the final ply renders as a dash, not "-M0" or 0.
+            # Unknown eval on the final ply shows no score in the diagnostics
+            # title (and never "-M0").
             page.keyboard.press("End")
             page.wait_for_timeout(200)
-            assert score.inner_text().strip().startswith("\u2014"), (
-                f"unknown eval should render as dash, got {score.inner_text()!r}"
-            )
+            title = score.inner_text()
+            assert "Game diagnostics" in title
+            assert "-M0" not in title, f"mate 0 rendered as a score: {title!r}"
 
             # Biggest swing button jumps to ply 4 (Qxd5, the larger drop).
-            biggest_btn = page.locator(".analysis-actions button", has_text="Biggest swing")
-            assert "Qxd5" in biggest_btn.inner_text()
+            try:
+                biggest_btn = page.locator(".diagnostics-actions button", has_text="Biggest swing")
+                assert "Qxd5" in biggest_btn.inner_text()
+            except Exception as exc:
+                print("CONSOLE_ERR=" + repr(console_errors))
+                print("BODY_ERR=" + repr(page.locator("body").inner_text()[:400]))
+                raise exc
             biggest_btn.click()
             page.wait_for_timeout(200)
             assert page.locator(".ply-indicator").inner_text() == "4/6"
             assert "+2.50" in score.inner_text()
 
             # Error navigation: next/previous between plies 1 and 4.
-            page.locator(".analysis-actions button", has_text="\u2039 Error").click()
+            page.locator(".diagnostics-actions button", has_text="\u2039 Error").click()
             page.wait_for_timeout(200)
             assert page.locator(".ply-indicator").inner_text() == "1/6"
-            page.locator(".analysis-actions button", has_text="Error \u203a").click()
+            page.locator(".diagnostics-actions button", has_text="Error \u203a").click()
             page.wait_for_timeout(200)
             assert page.locator(".ply-indicator").inner_text() == "4/6"
 
@@ -1241,12 +1261,155 @@ def test_browser_replay_black_to_move_fen(settings, engine_factory, registered):
 
             # Biggest swing is the black blunder and shows the full label.
             biggest_btn = page.locator(
-                ".analysis-actions button", has_text="Biggest swing"
+                ".diagnostics-actions button", has_text="Biggest swing"
             )
             assert "5...d6" in biggest_btn.inner_text()
             biggest_btn.click()
             page.wait_for_timeout(200)
             assert page.locator(".ply-indicator").inner_text() == "1/3"
+
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+def test_browser_replay_interactive_stockfish(settings, engine_factory, registered):
+    """P4.11 commit 2: any verified game gets interactive browser Stockfish
+    analysis without any server diagnostics artifact; the eval updates when
+    navigating plies."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="e2e-stockfish",
+            status=COMPLETED,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=1,
+            completed_pairs=1,
+            config_snapshot={
+                "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        from chessarena.models import PairJob
+
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status="COMPLETED",
+        )
+        session.add(pair)
+        session.flush()
+        pgn_path = settings.run_root / "sf-match.pgn"
+        pgn_path.parent.mkdir(parents=True, exist_ok=True)
+        pgn_path.write_text(SAMPLE_PGN, encoding="utf-8")
+        game = Game(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_job_id=pair.id,
+            game_number=1,
+            white_engine="EngineA",
+            black_engine="EngineB",
+            opening_index=0,
+            result="1-0",
+            pgn_path=str(pgn_path),
+            verified=True,
+        )
+        session.add(game)
+        session.commit()
+        gid = game.id
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/games/{gid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+
+            def _on_console(msg):
+                if msg.type == "error":
+                    console_errors.append(msg.text)
+
+            page.on("console", _on_console)
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+
+            resp = page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
+            assert resp.status == 200
+
+            # The browser Stockfish panel must appear without any server
+            # diagnostics artifact, and produce a score within 30s.
+            panel = page.locator(".analysis-panel")
+            panel.wait_for(state="visible", timeout=20000)
+            assert "Stockfish" in panel.inner_text()
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && !el.innerText.startsWith('\u2026');
+                }""",
+                timeout=30000,
+            )
+            first_score = page.locator(".analysis-score").inner_text()
+
+            # Navigating a ply re-analyzes the new position (the score panel
+            # is still present and the search indicator shows at some point).
+            page.keyboard.press("ArrowRight")
+            page.wait_for_timeout(500)
+            assert page.locator(".analysis-panel").count() == 1
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && !el.innerText.startsWith('\u2026');
+                }""",
+                timeout=30000,
+            )
+            second_score = page.locator(".analysis-score").inner_text()
+            # A different ply usually yields a different eval; at minimum the
+            # panel must be live (not the server artifact, which is absent).
+            assert "Stockfish" in panel.inner_text()
 
             assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()

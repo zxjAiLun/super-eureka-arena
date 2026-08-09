@@ -84,6 +84,18 @@
   color: #6b7480;
 }
 
+.diagnostics-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #c9d4e0;
+}
+
+.diagnostics-engine {
+  font-size: 0.72rem;
+  font-weight: 400;
+  color: #6b7480;
+}
+
 .analysis-line {
   font-size: 0.85rem;
   color: #c9d4e0;

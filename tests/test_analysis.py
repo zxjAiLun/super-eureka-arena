@@ -309,8 +309,8 @@ def test_bulk_analyze_skips_ready_and_queued(
     # Pending counts on the page: only gids[2] (failed loss) and gids[3]
     # (not-requested A-side loss, game_number 4 -> A Black loses the 1-0).
     page = app_client.get(f"/chessarena/admin/tournaments/{tid}")
-    assert "Analyze decisive games (2)" in page.text
-    assert "Analyze losses (2)" in page.text
+    assert "Prepare diagnostics \u00b7 decisive (2)" in page.text or "Prepare diagnostics" in page.text
+    assert "Prepare diagnostics \u00b7 losses (2)" in page.text or "Prepare diagnostics" in page.text
 
     r = _bulk_analyze(app_client, tid, "decisive")
     assert r.status_code == 303

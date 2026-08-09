@@ -135,17 +135,17 @@
 
 {% if tournament.status == "COMPLETED" %}
 <section class="panel">
-  <h3>Bulk analysis</h3>
-  <p class="muted">Queue Stockfish analysis for a whole subset; the worker analyzes them when idle (matches always win CPU).</p>
+  <h3>Bulk diagnostics</h3>
+  <p class="muted">Precompute whole-game diagnostics (?!/??/biggest-swing) for a subset; the worker prepares them when idle (matches always win CPU). Replay's interactive Stockfish analysis needs none of this.</p>
   <form method="post" action="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/analyze-bulk" style="display:inline">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="scope" value="decisive">
-    <button type="submit">Analyze decisive games ({{ decisive_count }})</button>
+    <button type="submit">Prepare diagnostics · decisive ({{ decisive_count }})</button>
   </form>
   <form method="post" action="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/analyze-bulk" style="display:inline">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <input type="hidden" name="scope" value="losses">
-    <button type="submit">Analyze losses ({{ losses_count }})</button>
+    <button type="submit">Prepare diagnostics · losses ({{ losses_count }})</button>
   </form>
 </section>
 {% endif %}
@@ -155,27 +155,27 @@
   {% if games %}
   <table>
     <thead>
-      <tr><th>#</th><th>White</th><th>Black</th><th>Result</th><th>Termination</th><th>Verified</th><th>Analysis</th></tr>
+      <tr><th>#</th><th>White</th><th>Black</th><th>Result</th><th>Termination</th><th>Replay</th><th>Diagnostics</th></tr>
     </thead>
     <tbody>
     {% for g in games %}
       <tr>
-        <td><a href="{{ settings.base_path }}/games/{{ g.id }}">{{ g.game_number }}</a></td>
+        <td>{{ g.game_number }}</td>
         <td>{{ g.white_engine }}</td>
         <td>{{ g.black_engine }}</td>
         <td>{{ g.result }}</td>
         <td>{{ g.termination }}</td>
-        <td>{{ "yes" if g.verified else "no" }}</td>
+        <td>{% if g.verified %}<a href="{{ settings.base_path }}/games/{{ g.id }}">Replay</a>{% else %}<span class="muted">—</span>{% endif %}</td>
         <td>
           {% set state = game_analysis.get(g.id) %}
           {% if state == "ready" %}
-            <span class="status status-completed">Analysis ready</span>
+            <span class="status status-completed">Diagnostics ready</span>
             <form method="post" action="{{ settings.base_path }}/admin/games/{{ g.id }}/analyze" style="display:inline">
               <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-              <button type="submit" class="linklike">Re-analyze</button>
+              <button type="submit" class="linklike">Re-prepare</button>
             </form>
           {% elif state == "failed" %}
-            <span class="status status-failed">Analysis failed</span>
+            <span class="status status-failed">Diagnostics failed</span>
             <form method="post" action="{{ settings.base_path }}/admin/games/{{ g.id }}/analyze" style="display:inline">
               <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
               <button type="submit" class="linklike">Retry</button>
@@ -185,7 +185,7 @@
           {% elif g.verified %}
             <form method="post" action="{{ settings.base_path }}/admin/games/{{ g.id }}/analyze" style="display:inline">
               <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
-              <button type="submit" class="linklike">Analyze with Stockfish</button>
+              <button type="submit" class="linklike">Prepare diagnostics</button>
             </form>
           {% else %}
             <span class="muted">—</span>

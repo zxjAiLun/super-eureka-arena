@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { Chess } from "chess.js";
+import { useStockfishAnalysis } from "./stockfish/useStockfishAnalysis";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -68,7 +69,7 @@ function useReplay({ gameId, tournamentId, basePath }) {
   const [meta, setMeta] = useState(null);
   const [pgn, setPgn] = useState("");
   const [startFen, setStartFen] = useState(START_FEN);
-  const [analysis, setAnalysis] = useState(null);
+  const [diagnostics, setDiagnostics] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -103,11 +104,11 @@ function useReplay({ gameId, tournamentId, basePath }) {
         // Analysis is optional: only fetch when the match detail says the game
         // has an artifact, so unanalyzed games never trigger a 404.
         if (game.analyzed) {
-          const analysisRes = await fetch(
+          const diagRes = await fetch(
             `${basePath}/public-api/v1/games/${gameId}/analysis`
           );
-          if (analysisRes.ok && !cancelled) {
-            setAnalysis(await analysisRes.json());
+          if (diagRes.ok && !cancelled) {
+            setDiagnostics(await diagRes.json());
           }
         }
         setStatus("ready");
@@ -123,11 +124,11 @@ function useReplay({ gameId, tournamentId, basePath }) {
     };
   }, [gameId, tournamentId, basePath]);
 
-  return { status, error, moves, meta, pgn, startFen, analysis };
+  return { status, error, moves, meta, pgn, startFen, diagnostics };
 }
 
 export default function App({ gameId, tournamentId, basePath, pairIndex }) {
-  const { status, error, moves, meta, pgn, startFen, analysis } = useReplay({
+  const { status, error, moves, meta, pgn, startFen, diagnostics } = useReplay({
     gameId,
     tournamentId,
     basePath,
@@ -172,6 +173,15 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     }
     return c.fen();
   }, [moves, ply, startFen]);
+
+  // P4.11 commit 2: interactive browser Stockfish — analyzes the current
+  // position in the browser (no server artifact required).  The server
+  // diagnostics remain only a whole-game source for ?!/??/biggest-swing.
+  const browser = useStockfishAnalysis({
+    fen,
+    enabled: status === "ready",
+    basePath,
+  });
 
   // Autoplay: advance one ply on a timer; stop at the last move.
   useEffect(() => {
@@ -226,14 +236,28 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     step(e.deltaY > 0 ? 1 : -1);
   };
 
-  // Keep the active move visible while navigating a long game.
+  // Keep the active move visible while navigating a long game: center it in
+  // the move list (manual scroll; scrollIntoView misbehaves in this overflow
+  // container), clamped at the edges.  A ResizeObserver re-centers whenever
+  // the analysis panels change the list height.
   useEffect(() => {
     if (status !== "ready") return undefined;
+    const list = document.querySelector(".moves-list");
     const active = document.querySelector(".move.active");
-    if (active) {
-      active.scrollIntoView({ block: "nearest", behavior: "smooth" });
-    }
-    return undefined;
+    const centerActive = () => {
+      if (!list || !active) return;
+      const max = list.scrollHeight - list.clientHeight;
+      const lr = list.getBoundingClientRect();
+      const ar = active.getBoundingClientRect();
+      const target =
+        list.scrollTop + (ar.top - lr.top) - list.clientHeight / 2;
+      list.scrollTop = Math.max(0, Math.min(max, target));
+    };
+    centerActive();
+    if (!list) return undefined;
+    const ro = new ResizeObserver(centerActive);
+    ro.observe(list);
+    return () => ro.disconnect();
   }, [ply, status]);
 
   // FEN-aware move numbering: the start position may be mid-game (Black to
@@ -269,8 +293,8 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   // evaluation on either side are marked `known: false` and never participate
   // in classification or the biggest-swing search.
   const swings = useMemo(() => {
-    if (!analysis?.positions?.length) return [];
-    const positions = analysis.positions;
+    if (!diagnostics?.positions?.length) return [];
+    const positions = diagnostics.positions;
     const out = [];
     for (let i = 1; i < positions.length; i++) {
       const before = shareOf(positions[i - 1]);
@@ -285,7 +309,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
       out.push({ ply: i, loss, known: true });
     }
     return out;
-  }, [analysis, moves]);
+  }, [diagnostics, moves]);
 
   const errorPlies = useMemo(
     () =>
@@ -306,8 +330,8 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   );
   const biggestText = biggest.ply
     ? `${moveLabel(biggest.ply)} ${formatScoreOf(
-        analysis?.positions?.[biggest.ply - 1]
-      )} → ${formatScoreOf(analysis?.positions?.[biggest.ply])}`
+        diagnostics?.positions?.[biggest.ply - 1]
+      )} → ${formatScoreOf(diagnostics?.positions?.[biggest.ply])}`
     : "";
   const jumpToBiggest = () => setPly(biggest.ply);
   const nextError = () => {
@@ -355,7 +379,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   }
 
   // Analysis is aligned by ply: positions[ply] covers the current position.
-  const pos = analysis?.positions?.[ply] ?? null;
+  const pos = diagnostics?.positions?.[ply] ?? null;
 
   const pvSans = (p) => {
     if (!p?.pv?.length) return [];
@@ -373,6 +397,11 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   };
   const scoreText = formatScoreOf(pos);
   const pvText = pos ? pvSans(pos) : [];
+  // The eval bar prefers the live browser Stockfish result.
+  const hasBrowserScore = browser.score_cp != null || browser.mate != null;
+  const barPos = hasBrowserScore ? browser : pos;
+  const browserScoreText = formatScoreOf(browser);
+  const browserPv = browser.pv ? pvSans({ fen, pv: browser.pv }) : [];
 
   return (
     <div className="replay" ref={replayRef} onWheel={onWheel}>
@@ -385,11 +414,11 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
         </div>
         <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
           <Chessboard options={{ position: fen, allowDragging: false }} />
-          {pos && (
+          {barPos && (
             <div className="eval-bar" aria-label="Evaluation">
               <div
                 className="eval-bar-white"
-                style={{ height: `${shareForUi(pos) * 100}%` }}
+                style={{ height: `${shareForUi(barPos) * 100}%` }}
               />
             </div>
           )}
@@ -455,21 +484,38 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           </span>
         </div>
 
-        {pos && (
+        {(hasBrowserScore || browser.status === "searching") && (
           <div className="analysis-panel">
             <div className="analysis-score">
-              {scoreText ?? "—"}
-              <span className="analysis-engine">{analysis.engine_name}</span>
+              {browserScoreText ?? "…"}
+              <span className="analysis-engine">Stockfish · browser</span>
             </div>
-            {pos.best_move && (
-              <div className="analysis-line">
-                Best: <strong>{pvText[0] ?? pos.best_move}</strong>
-              </div>
+            <div className="analysis-line">
+              {browser.depth != null && <>d{browser.depth} </>}
+              {browser.nps != null && <>· {(browser.nps / 1e6).toFixed(1)}M </>}
+              {browser.status === "searching" && <>· searching…</>}
+            </div>
+            {browserPv.length > 0 && (
+              <div className="analysis-pv">PV: {browserPv.join(" ")}</div>
             )}
+          </div>
+        )}
+
+        {pos && (
+          <div className="diagnostics-panel">
+            <div className="diagnostics-title">
+              Game diagnostics
+              {(scoreText || pos.best_move) && (
+                <span className="diagnostics-engine">
+                  {scoreText ? ` · ${scoreText}` : ""}
+                  {pos.best_move ? ` · best ${pos.best_move}` : ""}
+                </span>
+              )}
+            </div>
             {pvText.length > 0 && (
-              <div className="analysis-pv">PV: {pvText.join(" ")}</div>
+              <div className="diagnostics-pv">PV: {pvText.join(" ")}</div>
             )}
-            <div className="analysis-actions">
+            <div className="diagnostics-actions">
               <button
                 type="button"
                 onClick={jumpToBiggest}
