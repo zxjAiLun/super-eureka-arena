@@ -95,3 +95,13 @@ dd { margin: 0; }
 .result-summary .actions, .actions { display: flex; gap: 1rem; flex-wrap: wrap; margin-top: 0.4rem; }
 .action-link { color: var(--accent); text-decoration: none; }
 .action-link:hover { text-decoration: underline; }
+button.linklike {
+  background: none;
+  border: none;
+  color: var(--accent);
+  padding: 0;
+  margin: 0 0 0 0.4rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: underline;
+}

@@ -26,24 +26,30 @@ function useReplay({ gameId, tournamentId, basePath }) {
   const [meta, setMeta] = useState(null);
   const [pgn, setPgn] = useState("");
   const [startFen, setStartFen] = useState(START_FEN);
+  const [analysis, setAnalysis] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [matchRes, pgnRes] = await Promise.all([
-          fetch(`${basePath}/public-api/v1/matches/${tournamentId}`),
-          fetch(`${basePath}/public-api/v1/games/${gameId}/pgn`),
-        ]);
-        if (!matchRes.ok || !pgnRes.ok) {
+        const matchRes = await fetch(
+          `${basePath}/public-api/v1/matches/${tournamentId}`
+        );
+        if (!matchRes.ok) {
           throw new Error("failed to load game data");
         }
         const match = await matchRes.json();
-        const pgnText = await pgnRes.text();
         const game = match.games.find((g) => g.id === gameId);
         if (!game) {
           throw new Error("game not found in match");
         }
+        const pgnRes = await fetch(
+          `${basePath}/public-api/v1/games/${gameId}/pgn`
+        );
+        if (!pgnRes.ok) {
+          throw new Error("failed to load game data");
+        }
+        const pgnText = await pgnRes.text();
         const chess = new Chess();
         chess.loadPgn(pgnText);
         const ms = chess.history({ verbose: true });
@@ -52,6 +58,16 @@ function useReplay({ gameId, tournamentId, basePath }) {
         setPgn(pgnText);
         setStartFen(pgnStartFen(pgnText) || START_FEN);
         setMeta({ game, timeControl: match.time_control, matchName: match.name });
+        // Analysis is optional: only fetch when the match detail says the game
+        // has an artifact, so unanalyzed games never trigger a 404.
+        if (game.analyzed) {
+          const analysisRes = await fetch(
+            `${basePath}/public-api/v1/games/${gameId}/analysis`
+          );
+          if (analysisRes.ok && !cancelled) {
+            setAnalysis(await analysisRes.json());
+          }
+        }
         setStatus("ready");
       } catch (e) {
         if (!cancelled) {
@@ -65,11 +81,11 @@ function useReplay({ gameId, tournamentId, basePath }) {
     };
   }, [gameId, tournamentId, basePath]);
 
-  return { status, error, moves, meta, pgn, startFen };
+  return { status, error, moves, meta, pgn, startFen, analysis };
 }
 
 export default function App({ gameId, tournamentId, basePath, pairIndex }) {
-  const { status, error, moves, meta, pgn, startFen } = useReplay({
+  const { status, error, moves, meta, pgn, startFen, analysis } = useReplay({
     gameId,
     tournamentId,
     basePath,
@@ -193,6 +209,38 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     rows.push({ n: i / 2 + 1, white: moves[i], black: moves[i + 1] });
   }
 
+  // Analysis is aligned by ply: positions[ply] covers the current position.
+  const pos = analysis?.positions?.[ply] ?? null;
+
+  const formatScore = (p) => {
+    if (!p) return null;
+    if (p.mate != null) return p.mate > 0 ? `M${p.mate}` : `-M${Math.abs(p.mate)}`;
+    if (p.score_cp == null) return null;
+    const v = p.score_cp / 100;
+    return (v > 0 ? "+" : "") + v.toFixed(2);
+  };
+  const whiteShare = (p) => {
+    if (p.mate != null) return p.mate > 0 ? 0.98 : 0.02;
+    if (p.score_cp == null) return 0.5;
+    return Math.min(0.98, Math.max(0.02, 1 / (1 + Math.exp(-p.score_cp / 250))));
+  };
+  const pvSans = (p) => {
+    if (!p?.pv?.length) return [];
+    const c = new Chess(p.fen);
+    const out = [];
+    for (const uci of p.pv) {
+      try {
+        const m = c.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
+        out.push(m.san);
+      } catch {
+        break;
+      }
+    }
+    return out;
+  };
+  const scoreText = formatScore(pos);
+  const pvText = pos ? pvSans(pos) : [];
+
   return (
     <div className="replay" ref={replayRef} onWheel={onWheel}>
       <div className="replay-board-col">
@@ -204,6 +252,14 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
         </div>
         <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
           <Chessboard options={{ position: fen, allowDragging: false }} />
+          {pos && (
+            <div className="eval-bar" aria-label="Evaluation">
+              <div
+                className="eval-bar-white"
+                style={{ height: `${whiteShare(pos) * 100}%` }}
+              />
+            </div>
+          )}
         </div>
         <div className="player-card bottom">
           <span className="player-name">{game.white_engine}</span>
@@ -265,6 +321,23 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
             {game.termination ? ` · ${game.termination}` : ""}
           </span>
         </div>
+
+        {pos && (
+          <div className="analysis-panel">
+            <div className="analysis-score">
+              {scoreText ?? "—"}
+              <span className="analysis-engine">{analysis.engine_name}</span>
+            </div>
+            {pos.best_move && (
+              <div className="analysis-line">
+                Best: <strong>{pvText[0] ?? pos.best_move}</strong>
+              </div>
+            )}
+            {pvText.length > 0 && (
+              <div className="analysis-pv">PV: {pvText.join(" ")}</div>
+            )}
+          </div>
+        )}
 
         <div className="moves-list">
           {rows.map((r) => (

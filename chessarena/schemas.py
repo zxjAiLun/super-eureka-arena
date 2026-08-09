@@ -164,6 +164,8 @@ class PublicGameOut(BaseModel):
     result: Optional[str] = None
     termination: Optional[str] = None
     finished_at: Optional[datetime] = None
+    # P4.7: whether a Stockfish analysis artifact exists for this game.
+    analyzed: bool = False
 
     model_config = {"from_attributes": True}
 
@@ -187,6 +189,24 @@ class PublicMatchOut(BaseModel):
 
 class PublicMatchDetailOut(PublicMatchOut):
     games: List[PublicGameOut] = Field(default_factory=list)
+
+
+class PublicAnalysisPositionOut(BaseModel):
+    ply: int
+    fen: str
+    score_cp: Optional[int] = None
+    mate: Optional[int] = None
+    best_move: Optional[str] = None
+    pv: List[str] = Field(default_factory=list)
+
+
+class PublicAnalysisOut(BaseModel):
+    """Whitelisted per-game Stockfish analysis (P4.7).  Never exposes build
+    ids, binary SHAs, server paths or request artifacts."""
+
+    engine_name: str
+    limit: dict
+    positions: List[PublicAnalysisPositionOut]
 
 
 class LiveOut(BaseModel):

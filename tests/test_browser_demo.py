@@ -18,6 +18,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+import chess
 import pytest
 
 pytest.importorskip("playwright")
@@ -579,6 +580,165 @@ def test_browser_demo_long_game_active_move_scrolls_into_view(
                 }"""
             )
             assert active_visible, "active move not visible in move-list viewport"
+
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
+    """P4.7: with an analysis artifact present, the eval panel + bar render
+    and the score follows ←/→ navigation."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="e2e-analysis",
+            status=COMPLETED,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=1,
+            completed_pairs=1,
+            config_snapshot={
+                "engine_a": {"build_id": manifest["build_id"], "profile": "current-final"},
+                "engine_b": {"build_id": manifest["build_id"], "profile": "current"},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        from chessarena.models import PairJob
+
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status="COMPLETED",
+        )
+        session.add(pair)
+        session.flush()
+
+        pgn_path = settings.run_root / "analysis-match.pgn"
+        pgn_path.parent.mkdir(parents=True, exist_ok=True)
+        pgn_path.write_text(SAMPLE_PGN, encoding="utf-8")
+        game = Game(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_job_id=pair.id,
+            game_number=1,
+            white_engine="EngineA",
+            black_engine="EngineB",
+            opening_index=0,
+            result="1-0",
+            pgn_path=str(pgn_path),
+            verified=True,
+        )
+        session.add(game)
+        session.commit()
+        gid = game.id
+        tid = tournament.id
+
+    # Write an analysis artifact covering plies 0..5 (5 moves in SAMPLE_PGN).
+    scores = [20, -10, 55, -30, 120, -5]
+    positions = []
+    board = chess.Board()
+    fens = [board.fen()]
+    for uci in ["e2e4", "d7d5", "e4d5", "d8d5", "b1c3"]:
+        board.push_uci(uci)
+        fens.append(board.fen())
+    for ply, (fen, cp) in enumerate(zip(fens, scores)):
+        positions.append(
+            {"ply": ply, "fen": fen, "score_cp": cp, "mate": None,
+             "best_move": "g1f3", "pv": ["g1f3", "g8f6"]}
+        )
+    analysis_dir = settings.run_root / tid / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_dir / f"{gid}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": gid,
+                "engine": {"name": "Stockfish", "build_id": "x", "binary_sha256": "y"},
+                "limit": {"type": "nodes", "value": 100000},
+                "positions": positions,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/games/{gid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+
+            def _on_console(msg):
+                if msg.type == "error":
+                    console_errors.append(msg.text)
+
+            page.on("console", _on_console)
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+
+            resp = page.goto(f"{base}/games/{gid}", wait_until="networkidle")
+            assert resp.status == 200
+            page.wait_for_timeout(800)
+
+            assert page.locator(".eval-bar").count() == 1, "eval bar missing"
+            assert page.locator(".analysis-panel").count() == 1, "analysis panel missing"
+            score = page.locator(".analysis-score")
+            assert "+0.20" in score.inner_text(), "ply 0 score wrong"
+
+            # ArrowRight steps one ply -> score changes to black's perspective.
+            page.keyboard.press("ArrowRight")
+            page.wait_for_timeout(200)
+            assert "-0.10" in score.inner_text(), "ply 1 score wrong"
+            page.keyboard.press("ArrowRight")
+            page.wait_for_timeout(200)
+            assert "+0.55" in score.inner_text(), "ply 2 score wrong"
+            page.keyboard.press("ArrowLeft")
+            page.wait_for_timeout(200)
+            assert "-0.10" in score.inner_text(), "ply 1 score wrong after back"
 
             assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()

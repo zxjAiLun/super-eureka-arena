@@ -33,6 +33,11 @@ def main() -> int:
         cmd = line.strip()
         if cmd == "isready":
             print("readyok", flush=True)
+        elif cmd.startswith("go"):
+            # Emit one search result so the analysis pipeline has a score and
+            # PV to record (score is reported from the side to move).
+            print("info depth 1 seldepth 1 score cp 18 pv e2e4 e7e5", flush=True)
+            print("bestmove e2e4", flush=True)
         elif cmd == "quit":
             return 0
     return 0

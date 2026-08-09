@@ -32,10 +32,67 @@
 }
 
 .board-wrap {
+  position: relative;
   background: var(--demo-board-bg, #10141a);
   border-radius: 10px;
   padding: 6px;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+}
+
+.eval-bar {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  bottom: 6px;
+  width: 16px;
+  background: #262a31;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.eval-bar-white {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: #f0f0f0;
+  transition: height 0.3s ease;
+}
+
+.analysis-panel {
+  background: #1c222b;
+  border: 1px solid #2d343f;
+  border-radius: 10px;
+  padding: 0.6rem 0.8rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.analysis-score {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #e6edf3;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.analysis-engine {
+  font-size: 0.7rem;
+  font-weight: 400;
+  color: #6b7480;
+}
+
+.analysis-line {
+  font-size: 0.85rem;
+  color: #c9d4e0;
+}
+
+.analysis-pv {
+  font-size: 0.8rem;
+  color: #9aa4b2;
+  word-break: break-word;
 }
 
 .player-card {

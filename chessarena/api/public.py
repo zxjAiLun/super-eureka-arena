@@ -27,7 +27,13 @@ from ..models import (
     Game,
     Tournament,
 )
-from ..schemas import LiveOut, PublicGameOut, PublicMatchDetailOut, PublicMatchOut
+from ..schemas import (
+    LiveOut,
+    PublicAnalysisOut,
+    PublicGameOut,
+    PublicMatchDetailOut,
+    PublicMatchOut,
+)
 from ..services.labels import tournament_engine_label
 from ..services.replay import ReplayError, read_single_game_pgn
 from ..services.runtime_status import derive_runtime_status
@@ -80,6 +86,14 @@ def _public_match(session: Session, t: Tournament) -> PublicMatchOut:
     )
 
 
+def _public_game_out(g: Game) -> PublicGameOut:
+    from ..services.analysis import result_path
+
+    out = PublicGameOut.model_validate(g)
+    out.analyzed = result_path(g.tournament_id, g.id).is_file()
+    return out
+
+
 @router.get("/matches", response_model=list[PublicMatchOut])
 def list_public_matches(
     limit: int = 50,
@@ -119,7 +133,7 @@ def get_public_match(
     match = _public_match(session, t)
     return PublicMatchDetailOut(
         **match.model_dump(),
-        games=[PublicGameOut.model_validate(g) for g in games],
+        games=[_public_game_out(g) for g in games],
     )
 
 
@@ -148,6 +162,39 @@ def get_public_game_pgn(
         pgn,
         media_type="application/x-chess-pgn",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/games/{game_id}/analysis", response_model=PublicAnalysisOut)
+def get_public_game_analysis(
+    game_id: str,
+    session: Session = Depends(get_db),
+    settings=Depends(get_settings),
+):
+    """Whitelisted per-game Stockfish analysis (P4.7).  404 when the game is
+    not analyzed (the replay degrades to a normal replay)."""
+    from ..services.analysis import AnalysisError, read_analysis
+
+    game = session.query(Game).filter(Game.id == game_id).first()
+    if game is None or not game.verified:
+        raise HTTPException(status_code=404, detail="game not found")
+    tournament = (
+        session.query(Tournament)
+        .filter(Tournament.id == game.tournament_id)
+        .first()
+    )
+    if tournament is None or tournament.status != COMPLETED:
+        raise HTTPException(status_code=404, detail="game not found")
+    try:
+        data = read_analysis(game)
+    except AnalysisError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if data is None:
+        raise HTTPException(status_code=404, detail="game not analyzed")
+    return PublicAnalysisOut(
+        engine_name=data["engine"]["name"],
+        limit=data["limit"],
+        positions=data["positions"],
     )
 
 
@@ -335,7 +382,7 @@ def public_match_detail(
     match = _public_match(session, t)
     detail = PublicMatchDetailOut(
         **match.model_dump(),
-        games=[PublicGameOut.model_validate(g) for g in games],
+        games=[_public_game_out(g) for g in games],
     )
     return _render(
         request,

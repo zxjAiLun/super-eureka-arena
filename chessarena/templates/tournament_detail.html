@@ -113,17 +113,42 @@
   {% if games %}
   <table>
     <thead>
-      <tr><th>#</th><th>White</th><th>Black</th><th>Result</th><th>Termination</th><th>Verified</th></tr>
+      <tr><th>#</th><th>White</th><th>Black</th><th>Result</th><th>Termination</th><th>Verified</th><th>Analysis</th></tr>
     </thead>
     <tbody>
     {% for g in games %}
       <tr>
-        <td>{{ g.game_number }}</td>
+        <td><a href="{{ settings.base_path }}/games/{{ g.id }}">{{ g.game_number }}</a></td>
         <td>{{ g.white_engine }}</td>
         <td>{{ g.black_engine }}</td>
         <td>{{ g.result }}</td>
         <td>{{ g.termination }}</td>
         <td>{{ "yes" if g.verified else "no" }}</td>
+        <td>
+          {% set state = game_analysis.get(g.id) %}
+          {% if state == "ready" %}
+            <span class="status status-completed">Analysis ready</span>
+            <form method="post" action="{{ settings.base_path }}/admin/games/{{ g.id }}/analyze" style="display:inline">
+              <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+              <button type="submit" class="linklike">Re-analyze</button>
+            </form>
+          {% elif state == "failed" %}
+            <span class="status status-failed">Analysis failed</span>
+            <form method="post" action="{{ settings.base_path }}/admin/games/{{ g.id }}/analyze" style="display:inline">
+              <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+              <button type="submit" class="linklike">Retry</button>
+            </form>
+          {% elif state == "queued" %}
+            <span class="status status-pending">Queued</span>
+          {% elif g.verified %}
+            <form method="post" action="{{ settings.base_path }}/admin/games/{{ g.id }}/analyze" style="display:inline">
+              <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+              <button type="submit" class="linklike">Analyze with Stockfish</button>
+            </form>
+          {% else %}
+            <span class="muted">—</span>
+          {% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>

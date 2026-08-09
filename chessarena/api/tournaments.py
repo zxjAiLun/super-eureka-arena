@@ -979,6 +979,10 @@ def admin_tournament_detail(
         if custom_elo is not None:
             run_again += f"&{side}_elo={custom_elo}"
 
+    from ..services.analysis import analysis_state
+
+    game_analysis = {g.id: analysis_state(g) for g in games}
+
     return templates.TemplateResponse(
         request,
         "tournament_detail.html",
@@ -993,6 +997,7 @@ def admin_tournament_detail(
             "run_again": run_again,
             "engine_a_label": engine_a_label,
             "engine_b_label": engine_b_label,
+            "game_analysis": game_analysis,
             "can_delete": tournament.status in DELETABLE_STATUSES,
             "has_combined": has_combined,
             "has_summary": has_summary,
@@ -1104,6 +1109,48 @@ async def admin_tournament_delete(
     session.commit()
     return RedirectResponse(
         url=f"{request.app.state.settings.base_path}/admin/",
+        status_code=303,
+    )
+
+
+@admin_router.post("/admin/games/{game_id}/analyze",
+                   response_class=RedirectResponse)
+async def admin_game_analyze(
+    request: Request,
+    game_id: str,
+    session: Session = Depends(get_db),
+):
+    """Queue a verified game for Stockfish analysis (P4.7).  Only verified
+    games in COMPLETED matches; re-submitting re-analyzes."""
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    game = session.query(Game).filter(Game.id == game_id).first()
+    if game is None:
+        raise HTTPException(status_code=404, detail="game not found")
+    tournament = (
+        session.query(Tournament)
+        .filter(Tournament.id == game.tournament_id)
+        .first()
+    )
+    if tournament is None or tournament.status != COMPLETED:
+        raise HTTPException(
+            status_code=409,
+            detail="only completed matches can be analyzed",
+        )
+    if not game.verified:
+        raise HTTPException(
+            status_code=409,
+            detail="only verified games can be analyzed",
+        )
+    from ..services.analysis import request_analysis
+
+    request_analysis(request.app.state.settings, game)
+    session.flush()
+    return RedirectResponse(
+        url=(
+            f"{request.app.state.settings.base_path}/admin/tournaments/"
+            f"{game.tournament_id}"
+        ),
         status_code=303,
     )
 
