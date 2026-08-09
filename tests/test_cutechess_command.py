@@ -24,6 +24,7 @@ def test_time_control_presets_are_fixed():
     assert TIME_CONTROLS == {
         "bullet_1_0": {"label": "Bullet 1+0", "cutechess_tc": "60"},
         "blitz_3_2": {"label": "Blitz 3+2", "cutechess_tc": "180+2"},
+        "blitz_10_01": {"label": "Blitz 10+0.1", "cutechess_tc": "10+0.1"},
         "rapid_5_3": {"label": "Rapid 5+3", "cutechess_tc": "300+3"},
     }
 
