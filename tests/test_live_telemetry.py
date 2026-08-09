@@ -13,15 +13,15 @@ OPENING = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
 DEBUG_LINES = "\n".join(
     [
-        ">ChessEngine Production(0): uci",
-        "<ChessEngine Production(0): id name ChessEngineDemo",
-        ">ChessEngine Production(0): position fen rn1qk2r/ppp1bppp/1n2p3/4Pb2/3P4/1BN5/PP2NPPP/R1BQK2R w KQkq - 2 9",
-        ">ChessEngine Production(0): go wtime 180000 btime 180000 winc 2000 binc 2000",
-        "<ChessEngine Production(0): info depth 14 score cp 35 nodes 123456 nps 2000000 time 61 pv e2g3 c7c5 g1e2",
-        ">Stockfish Limited 2000(0): position fen rn1qk2r/ppp1bppp/1n2p3/4Pb2/3P4/1BN5/PP2NPPP/R1BQK2R w KQkq - 2 9 moves e2g3",
-        ">Stockfish Limited 2000(0): go wtime 179800 btime 178000 winc 2000 binc 2000",
-        "<Stockfish Limited 2000(0): info depth 22 score cp -12 nodes 987654 nps 1800000 time 88 pv c7c5 g1e2 d7d5",
-        "<ChessEngine Production(0): bestmove e2g3 ponder c7c5",
+        "4 >ChessEngine Production(0): uci",
+        "6 <ChessEngine Production(0): id name ChessEngineDemo",
+        "9 >ChessEngine Production(0): position fen rn1qk2r/ppp1bppp/1n2p3/4Pb2/3P4/1BN5/PP2NPPP/R1BQK2R w KQkq - 2 9",
+        "11 >ChessEngine Production(0): go wtime 180000 btime 180000 winc 2000 binc 2000",
+        "13 <ChessEngine Production(0): info depth 14 score cp 35 nodes 123456 nps 2000000 time 61 pv e2g3 c7c5 g1e2",
+        "14 >Stockfish Limited 2000(0): position fen rn1qk2r/ppp1bppp/1n2p3/4Pb2/3P4/1BN5/PP2NPPP/R1BQK2R w KQkq - 2 9 moves e2g3",
+        "15 >Stockfish Limited 2000(0): go wtime 179800 btime 178000 winc 2000 binc 2000",
+        "17 <Stockfish Limited 2000(0): info depth 22 score cp -12 nodes 987654 nps 1800000 time 88 pv c7c5 g1e2 d7d5",
+        "20 <ChessEngine Production(0): bestmove e2g3 ponder c7c5",
     ]
 )
 

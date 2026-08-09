@@ -20,7 +20,10 @@ from typing import Optional
 import chess
 
 # >Name(0): payload  /  <Name(0): payload  (name may contain spaces).
-_DEBUG_RE = re.compile(r"^([<>])(.+?)\((\d+)\): (.*)$")
+# cutechess 1.5.1 prefixes every debug line with a message counter
+# ("4 >ChessEngine Production(0): uci"), so the optional leading digits are
+# skipped; match-facing lines (Started/Finished game) carry no prefix.
+_DEBUG_RE = re.compile(r"^\s*\d*\s*([<>])(.+?)\((\d+)\): (.*)$")
 
 # Hard cap on the tail read: keeps repeated 1.5s polls cheap while always
 # covering the currently streaming search.
