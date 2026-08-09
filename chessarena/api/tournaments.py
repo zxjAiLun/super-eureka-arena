@@ -810,9 +810,13 @@ def _new_match_defaults(session, settings, query: dict) -> dict:
 
 def _preset_elo_limits(schema: dict) -> dict | None:
     """(min, max) of a build's UCI_Elo spin option, or None when the build
-    does not support strength limiting (custom Elo hidden)."""
+    does not support strength limiting (custom Elo hidden).  Mirrors the
+    backend create contract: UCI_Elo spin AND UCI_LimitStrength check."""
     elo = (schema or {}).get("UCI_Elo")
+    strength = (schema or {}).get("UCI_LimitStrength")
     if elo is None or elo.get("type") != "spin":
+        return None
+    if strength is None or strength.get("type") != "check":
         return None
     return {"min": elo.get("min"), "max": elo.get("max")}
 

@@ -67,9 +67,10 @@ def _is_stockfish_build(session, side: dict) -> bool:
         .filter(EngineBuild.build_id == build_id)
         .first()
     )
-    # Frozen snapshots are authoritative even if the build row is gone; the
-    # capability flags above already narrow this to a limited-strength engine.
-    return build is None or build.engine_name == ANCHOR_ENGINE_NAME
+    # Fail closed: only an actual registered Stockfish build is an anchor.  A
+    # missing build row must not be guessed to be Stockfish (some other engine
+    # with UCI_LimitStrength/UCI_Elo could then be misread as a fixed anchor).
+    return build is not None and build.engine_name == ANCHOR_ENGINE_NAME
 
 
 def is_anchor(session, side: dict) -> bool:

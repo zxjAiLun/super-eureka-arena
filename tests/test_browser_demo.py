@@ -765,6 +765,32 @@ def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
             page.wait_for_timeout(200)
             assert page.locator(".ply-indicator").inner_text() == "4/6"
 
+            # P4.5a repair: pause -> play resumes from the current ply instead
+            # of restarting from the start; play from the final position does
+            # restart from ply 0.
+            page.keyboard.press("Home")  # ply 0
+            page.keyboard.press("ArrowRight")  # ply 1
+            page.keyboard.press("ArrowRight")  # ply 2
+            page.locator("button", has_text="\u25b6").click()  # play
+            page.wait_for_timeout(120)
+            page.locator("button", has_text="\u23f8").click()  # pause
+            resumed = page.locator(".ply-indicator").inner_text()
+            assert resumed.startswith("2/"), f"resume reset to start: {resumed}"
+            # Play again from the middle keeps the position (no reset).
+            page.locator("button", has_text="\u25b6").click()
+            page.wait_for_timeout(120)
+            page.locator("button", has_text="\u23f8").click()
+            resumed2 = page.locator(".ply-indicator").inner_text()
+            assert resumed2.startswith("2/"), f"second resume reset: {resumed2}"
+            # From the final position, play restarts from ply 0.
+            page.keyboard.press("End")
+            page.locator("button", has_text="\u25b6").click()
+            page.wait_for_timeout(120)
+            page.locator("button", has_text="\u23f8").click()
+            assert page.locator(".ply-indicator").inner_text() == "0/6", (
+                "play from the end must restart from ply 0"
+            )
+
             assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()
     finally:
@@ -915,6 +941,120 @@ def test_browser_match_filters(settings, engine_factory, registered):
             assert visible_count() == 1
             click_filter("All")
             assert visible_count() == 3
+
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+def test_browser_custom_elo_hidden_input_cleared(settings, engine_factory, registered):
+    """P4.6 repair: switching to a preset whose build lacks UCI_Elo clears and
+    disables the hidden Custom Elo input so a stale value is never submitted."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    with engine_factory() as session:
+        from chessarena.models import EngineBuild, EnginePreset
+
+        elo_build = session.query(EngineBuild).first()
+        elo_build.uci_options_schema = {
+            "UCI_LimitStrength": {"type": "check", "default": "false"},
+            "UCI_Elo": {"type": "spin", "default": "1350", "min": 1, "max": 2850},
+        }
+        no_elo = EngineBuild(
+            build_id="no-elo-build",
+            engine_name="NoEloEngine",
+            git_sha="external",
+            binary_path="/unused/noelo",
+            binary_sha256="b" * 64,
+            platform="linux-x86_64",
+            supported_profiles=[],
+            manifest={},
+            enabled=True,
+            uci_options_schema={"Hash": {"type": "spin"}},
+        )
+        session.add(no_elo)
+        session.add(
+            EnginePreset(
+                preset_id="no-elo-preset",
+                build_id="no-elo-build",
+                display_name="No Elo Engine",
+                command_args=[],
+                uci_options={},
+                category="custom",
+                public_visible=True,
+                enabled=True,
+            )
+        )
+        session.commit()
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/admin/tournaments/new")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+
+            def _on_console(msg):
+                if msg.type == "error":
+                    console_errors.append(msg.text)
+
+            page.on("console", _on_console)
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+
+            resp = page.goto(f"{base}/admin/tournaments/new", wait_until="networkidle")
+            assert resp.status == 200
+            page.wait_for_timeout(300)
+
+            elo_input = page.locator('input[name="engine_b_elo"]')
+            # Select an Elo-capable preset, type a custom Elo.
+            page.select_option('select[name="engine_b_preset"]', "chessengine-legacy-current")
+            page.wait_for_timeout(150)
+            assert elo_input.is_visible()
+            elo_input.fill("1850")
+
+            # Switch to a preset without UCI_Elo: input hidden, cleared, disabled.
+            page.select_option('select[name="engine_b_preset"]', "no-elo-preset")
+            page.wait_for_timeout(150)
+            assert not elo_input.is_visible()
+            assert elo_input.input_value() == ""
+            assert elo_input.is_disabled()
+
+            # Switching back re-enables it.
+            page.select_option('select[name="engine_b_preset"]', "chessengine-legacy-current")
+            page.wait_for_timeout(150)
+            assert elo_input.is_visible()
+            assert not elo_input.is_disabled()
 
             assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()

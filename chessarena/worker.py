@@ -53,6 +53,31 @@ def _start_analysis_if_queued(
     return thread
 
 
+def _worker_step(settings, session_factory, scheduler, analysis_thread):
+    """One iteration of match/analysis arbitration (P4.7 repair).
+
+    Contract: matches always win; analysis only runs while the match queue is
+    idle, and once an analysis game has started it finishes before the worker
+    services a queued match — the scheduler is not ticked (it would launch a
+    new CuteChess pair) while the analysis thread is alive.
+
+    Returns ``(action, analysis_thread)`` where action is the scheduler tick
+    result, "analysis-running", "analysis-started" or "idle".
+    """
+    if analysis_thread is not None and analysis_thread.is_alive():
+        # A game analysis is in flight: matches wait for it to finish.  This
+        # keeps the analyzer (Threads=2, 256 MB) from sharing CPU with a
+        # timed match, which would pollute measured strength.
+        return "analysis-running", analysis_thread
+    action = scheduler.tick()
+    if action != "idle":
+        return action, analysis_thread
+    analysis_thread = _start_analysis_if_queued(settings, session_factory)
+    if analysis_thread is not None:
+        return "analysis-started", analysis_thread
+    return "idle", analysis_thread
+
+
 def _handle_signal(signum, frame):
     logger.info("received signal %s, shutting down", signum)
     _stop_event.set()
@@ -109,16 +134,11 @@ def run_worker(settings: Settings, session_factory) -> int:
     while not _stop_event.is_set():
         started = time.monotonic()
         try:
-            action = scheduler.tick()
-            if action != "idle":
+            action, analysis_thread = _worker_step(
+                settings, session_factory, scheduler, analysis_thread
+            )
+            if action not in ("idle", "analysis-running"):
                 logger.info("tick: %s", action)
-            elif analysis_thread is None or not analysis_thread.is_alive():
-                # Match queue is idle: use spare CPU for queued game analysis.
-                # Matches always win the scheduler tick above; a running
-                # analysis finishes its current game before yielding.
-                analysis_thread = _start_analysis_if_queued(
-                    settings, session_factory
-                )
         except Exception:
             logger.exception("scheduler tick failed")
         if time.monotonic() - last_beat >= settings.worker_heartbeat_seconds:

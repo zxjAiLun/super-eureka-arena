@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import math
 
-from chessarena.models import COMPLETED, Tournament, utcnow
+import pytest
+
+from chessarena.models import COMPLETED, EngineBuild, Tournament, utcnow
 from chessarena.services import ratings
 
 SF_A = {
@@ -28,6 +30,27 @@ ENGINE = {
     "uci_options": {},
     "binary_sha256": "engine-sha",
 }
+
+
+@pytest.fixture(autouse=True)
+def stockfish_anchor_build(engine_factory):
+    """The anchor recognition is fail-closed: the Stockfish build row must
+    actually exist for a snapshot side to be treated as a fixed anchor."""
+    with engine_factory() as session:
+        session.add(
+            EngineBuild(
+                build_id="stockfish-build",
+                engine_name="Stockfish",
+                git_sha="external",
+                binary_path="/unused/stockfish",
+                binary_sha256="a" * 64,
+                platform="linux-x86_64",
+                supported_profiles=[],
+                manifest={},
+                enabled=True,
+            )
+        )
+        session.commit()
 
 
 def _completed_rated(engine_factory, tournament_factory, *, tc="blitz_3_2",
@@ -184,3 +207,22 @@ def test_engine_on_anchor_side_scored_from_engine_perspective(
         rows = ratings.compute_ratings(session)["blitz_3_2"]["engines"]
     expected = 2000 - 400 * math.log10(9)
     assert abs(rows[0]["rating"] - expected) < 1
+
+
+def test_missing_build_is_not_anchor(engine_factory, tournament_factory):
+    """Fail closed: a snapshot side whose Stockfish build row is gone must not
+    be treated as a fixed anchor (would corrupt the rating scale)."""
+    ghost = {
+        "preset_id": "stockfish-limited-2000",
+        "display_name": "Stockfish Limited 2000",
+        "build_id": "ghost-build",  # no EngineBuild row exists for this id
+        "uci_options": {"UCI_LimitStrength": True, "UCI_Elo": 2000},
+    }
+    _completed_rated(engine_factory, tournament_factory,
+                     wins=0, losses=10, draws=0, anchor=ghost)
+    with engine_factory() as session:
+        pools = ratings.compute_ratings(session)
+    # No anchor and no engine rating: the match is engine-vs-"unknown" and
+    # skipped entirely.
+    assert pools["blitz_3_2"]["engines"] == []
+    assert pools["blitz_3_2"]["anchors"] == []

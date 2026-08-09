@@ -106,13 +106,18 @@
     var limit = PRESET_ELO[presetId];
     var els = eloEls(side);
     if (!limit) {
+      // Unsupported preset: hide, clear and disable so a stale value can
+      // never be submitted (the backend would otherwise 422 on a hidden Elo).
       els.wrap.style.display = 'none';
+      els.input.disabled = true;
+      els.input.value = '';
       els.input.removeAttribute('min');
       els.input.removeAttribute('max');
       els.range.textContent = '';
       return;
     }
     els.wrap.style.display = 'block';
+    els.input.disabled = false;
     if (limit.min != null) { els.input.setAttribute('min', limit.min); }
     if (limit.max != null) { els.input.setAttribute('max', limit.max); }
     els.range.textContent = 'Allowed: ' + limit.min + '\u2013' + limit.max;

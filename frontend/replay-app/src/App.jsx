@@ -173,7 +173,9 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     if (playing) {
       setPlaying(false);
     } else {
-      setPly(0);
+      // Resume from the current ply; only restart from the start when the
+      // game is already at the final position.
+      if (ply >= moves.length) setPly(0);
       setPlaying(true);
     }
   };
@@ -196,7 +198,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [status, moves.length, playing]);
+  }, [status, moves.length, playing, ply]);
 
   const onWheel = (e) => {
     // Wheel steps moves only outside the move list, so the move list can
