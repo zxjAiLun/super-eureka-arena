@@ -192,3 +192,93 @@ def test_analysis_api_reads_artifact(app_client, settings, engine_factory,
     text = str(body)
     for forbidden in ("build_id", "binary_sha256", "pgn_path", "run_root"):
         assert forbidden not in text
+
+
+# ---------------------------------------------------------------------------
+# P4.10 bulk analysis
+# ---------------------------------------------------------------------------
+def _bulk_game(settings, engine_factory, tournament_factory, results):
+    """One verified game per result; game_number parity gives A's color."""
+    tid = tournament_factory(name="bulk", pairs=len(results), status=COMPLETED)
+    gids = []
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        pgn_path = settings.run_root / tid / "pairs" / "000000" / "attempt-01" / "match.pgn"
+        pgn_path.parent.mkdir(parents=True, exist_ok=True)
+        pgn_path.write_text(ANALYSIS_PGN, encoding="utf-8")
+        for i, result in enumerate(results):
+            pair = t.pair_jobs[i]
+            pair.status = "COMPLETED"
+            g = Game(
+                tournament_id=tid,
+                pair_job_id=pair.id,
+                game_number=i + 1,
+                white_engine="EngineA",
+                black_engine="EngineB",
+                opening_index=i,
+                result=result,
+                pgn_path=str(pgn_path),
+                verified=True,
+            )
+            session.add(g)
+            session.flush()
+            gids.append(g.id)
+        session.commit()
+    return tid, gids
+
+
+def _bulk_analyze(app_client, tid, scope):
+    app_client.get("/chessarena/admin/tournaments/new")
+    token = app_client.cookies.get("arena_csrf")
+    return app_client.post(
+        f"/chessarena/admin/tournaments/{tid}/analyze-bulk",
+        data={"_csrf_token": token, "scope": scope},
+        follow_redirects=False,
+    )
+
+
+def test_bulk_analyze_decisive(settings, engine_factory, tournament_factory,
+                               app_client):
+    # game_number 1 (A White) 1-0 win, 2 (A Black) 1-0 loss, 3 draw.
+    tid, gids = _bulk_game(
+        settings, engine_factory, tournament_factory,
+        ["1-0", "1-0", "1/2-1/2"],
+    )
+    r = _bulk_analyze(app_client, tid, "decisive")
+    assert r.status_code == 303
+    assert analysis.request_path(tid, gids[0]).is_file()
+    assert analysis.request_path(tid, gids[1]).is_file()
+    assert not analysis.request_path(tid, gids[2]).exists()
+
+
+def test_bulk_analyze_losses_engine_a_perspective(
+    settings, engine_factory, tournament_factory, app_client
+):
+    # game 1 A White wins, game 2 A Black loses -> only game 2 is a loss.
+    tid, gids = _bulk_game(
+        settings, engine_factory, tournament_factory,
+        ["1-0", "1-0", "1/2-1/2"],
+    )
+    r = _bulk_analyze(app_client, tid, "losses")
+    assert r.status_code == 303
+    assert not analysis.request_path(tid, gids[0]).exists()
+    assert analysis.request_path(tid, gids[1]).is_file()
+    assert not analysis.request_path(tid, gids[2]).exists()
+
+
+def test_bulk_analyze_rejects_non_completed(
+    settings, engine_factory, tournament_factory, app_client
+):
+    tid = tournament_factory(name="draft", pairs=1, status="DRAFT")
+    r = _bulk_analyze(app_client, tid, "decisive")
+    assert r.status_code == 409
+
+
+def test_bulk_analyze_rejects_unknown_scope(
+    settings, engine_factory, tournament_factory, app_client
+):
+    tid, _ = _bulk_game(
+        settings, engine_factory, tournament_factory, ["1-0"]
+    )
+    r = _bulk_analyze(app_client, tid, "wins")
+    assert r.status_code == 400

@@ -993,6 +993,18 @@ def admin_tournament_detail(
 
     rated_elo = engine_rating(session, tournament)
 
+    # P4.10 bulk-analyze counts over verified games (pair color contract).
+    decisive_count = losses_count = 0
+    for g in games:
+        result = g.result or ""
+        if result in ("1-0", "0-1"):
+            decisive_count += 1
+            a_white = g.game_number % 2 == 1
+            if (a_white and result == "0-1") or (
+                not a_white and result == "1-0"
+            ):
+                losses_count += 1
+
     return templates.TemplateResponse(
         request,
         "tournament_detail.html",
@@ -1009,6 +1021,8 @@ def admin_tournament_detail(
             "engine_b_label": engine_b_label,
             "game_analysis": game_analysis,
             "rated_elo": rated_elo,
+            "decisive_count": decisive_count,
+            "losses_count": losses_count,
             "can_delete": tournament.status in DELETABLE_STATUSES,
             "has_combined": has_combined,
             "has_summary": has_summary,
@@ -1161,6 +1175,63 @@ async def admin_game_analyze(
         url=(
             f"{request.app.state.settings.base_path}/admin/tournaments/"
             f"{game.tournament_id}"
+        ),
+        status_code=303,
+    )
+
+
+@admin_router.post("/admin/tournaments/{tournament_id}/analyze-bulk",
+                   response_class=RedirectResponse)
+async def admin_tournament_analyze_bulk(
+    request: Request,
+    tournament_id: str,
+    session: Session = Depends(get_db),
+):
+    """Queue analysis for a whole subset of a completed match (P4.10).
+
+    ``scope`` is ``decisive`` (1-0 / 0-1) or ``losses`` (Engine A perspective
+    losses, using the pair color contract — odd game_number A is White).  Just
+    writes request artifacts; the idle worker analyzes them one by one.
+    """
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    scope = form.get("scope")
+    if scope not in ("decisive", "losses"):
+        raise HTTPException(status_code=400, detail="unknown analysis scope")
+    t = _get_tournament_or_404(session, tournament_id)
+    if t.status != COMPLETED:
+        raise HTTPException(
+            status_code=409,
+            detail="only completed matches can be analyzed",
+        )
+    from ..services.analysis import request_analysis
+
+    games = (
+        session.query(Game)
+        .filter(Game.tournament_id == tournament_id, Game.verified.is_(True))
+        .order_by(Game.game_number)
+        .all()
+    )
+    selected = 0
+    for g in games:
+        result = g.result or ""
+        if scope == "decisive":
+            matches = result in ("1-0", "0-1")
+        else:  # losses: Engine A perspective
+            a_white = g.game_number % 2 == 1
+            matches = (
+                (a_white and result == "0-1")
+                or (not a_white and result == "1-0")
+            )
+        if not matches:
+            continue
+        request_analysis(request.app.state.settings, g)
+        selected += 1
+    session.flush()
+    return RedirectResponse(
+        url=(
+            f"{request.app.state.settings.base_path}/admin/tournaments/"
+            f"{tournament_id}"
         ),
         status_code=303,
     )

@@ -133,6 +133,23 @@
   {% include "_pair_progress.html" %}
 </section>
 
+{% if tournament.status == "COMPLETED" %}
+<section class="panel">
+  <h3>Bulk analysis</h3>
+  <p class="muted">Queue Stockfish analysis for a whole subset; the worker analyzes them when idle (matches always win CPU).</p>
+  <form method="post" action="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/analyze-bulk" style="display:inline">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <input type="hidden" name="scope" value="decisive">
+    <button type="submit">Analyze decisive games ({{ decisive_count }})</button>
+  </form>
+  <form method="post" action="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/analyze-bulk" style="display:inline">
+    <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
+    <input type="hidden" name="scope" value="losses">
+    <button type="submit">Analyze losses ({{ losses_count }})</button>
+  </form>
+</section>
+{% endif %}
+
 <section class="panel">
   <h3>Recent games</h3>
   {% if games %}

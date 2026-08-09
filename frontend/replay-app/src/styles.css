@@ -127,6 +127,12 @@
   margin-left: 0.2rem;
 }
 
+.move-ellipsis {
+  color: #6b7480;
+  text-align: left;
+  padding: 0.15rem 0.7rem;
+}
+
 .player-card {
   display: flex;
   align-items: center;

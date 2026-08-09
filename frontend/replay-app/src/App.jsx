@@ -499,27 +499,25 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           {rows.map((r) => (
             <div className="move-row" key={r.n}>
               <span className="move-n">{r.n}.</span>
-              <button
-                type="button"
-                className={
-                  "move" + (r.white && ply === r.white.ply ? " active" : "")
-                }
-                onClick={() => r.white && setPly(r.white.ply)}
-                title={r.white && markFor(r.white.ply - 1)
-                  ? "Arena classification · evaluation swing"
-                  : ""}
-              >
-                {r.white
-                  ? r.white.move.san
-                  : r.black
-                    ? "…"
+              {r.white ? (
+                <button
+                  type="button"
+                  className={"move" + (ply === r.white.ply ? " active" : "")}
+                  onClick={() => setPly(r.white.ply)}
+                  title={markFor(r.white.ply - 1)
+                    ? "Arena classification · evaluation swing"
                     : ""}
-                {r.white && markFor(r.white.ply - 1) && (
-                  <span className="move-mark">
-                    {markFor(r.white.ply - 1)}
-                  </span>
-                )}
-              </button>
+                >
+                  {r.white.move.san}
+                  {markFor(r.white.ply - 1) && (
+                    <span className="move-mark">
+                      {markFor(r.white.ply - 1)}
+                    </span>
+                  )}
+                </button>
+              ) : (
+                <span className="move-ellipsis">…</span>
+              )}
               {r.black && (
                 <button
                   type="button"
