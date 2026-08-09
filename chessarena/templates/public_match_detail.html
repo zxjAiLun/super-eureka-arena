@@ -41,8 +41,12 @@
   </thead>
   <tbody>
     {% for g in match.games %}
-      {% set win = (g.white_engine == match.engine_a_label and g.result == "1-0") or (g.black_engine == match.engine_a_label and g.result == "0-1") %}
-      {% set loss = (g.white_engine == match.engine_a_label and g.result == "0-1") or (g.black_engine == match.engine_a_label and g.result == "1-0") %}
+      {# Engine A identity follows the pair color contract: odd game_number ->
+         A is White, even game_number -> A is Black.  Never inferred from
+         display names (self-play / duplicate names would double-count). #}
+      {% set a_white = (g.game_number % 2 == 1) %}
+      {% set win = (a_white and g.result == "1-0") or (not a_white and g.result == "0-1") %}
+      {% set loss = (a_white and g.result == "0-1") or (not a_white and g.result == "1-0") %}
       <tr
         data-result="{{ g.result or '' }}"
         data-candidate-win="{{ '1' if win else '0' }}"

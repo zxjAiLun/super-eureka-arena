@@ -105,11 +105,12 @@ def test_worker_step_never_ticks_while_analysis_alive():
 
 def test_analysis_timeout_writes_error(settings, engine_factory,
                                        tournament_factory, monkeypatch):
-    """A hung analyzer must time out, get terminated, and produce .error.json
-    instead of blocking the worker forever."""
+    """A hung analyzer must time out (the monkeypatched 1s deadline is real),
+    get terminated, and produce .error.json instead of blocking forever."""
     monkeypatch.setattr(analysis, "SEARCH_TIMEOUT", 1.0)
     tid, gid = _completed_game(settings, engine_factory, tournament_factory)
     _set_analyzer(engine_factory, HANG_ENGINE)
+    started = time.monotonic()
     with engine_factory() as session:
         game = session.query(Game).filter(Game.id == gid).one()
         analysis.request_analysis(settings, game)
@@ -118,6 +119,8 @@ def test_analysis_timeout_writes_error(settings, engine_factory,
         err = analysis.error_path(tid, gid)
         assert err.is_file()
         assert analysis.analysis_state(game) == "failed"
+    # SEARCH_TIMEOUT is read at call time, so the 1s deadline really applied.
+    assert time.monotonic() - started < 10, "timeout was not honored"
 
 
 def test_analysis_abandoned_when_match_deleted(settings, engine_factory,
@@ -144,4 +147,25 @@ def test_analysis_abandoned_when_match_deleted(settings, engine_factory,
         outcome = analysis.run_analysis(settings, session, game)
         assert outcome == "abandoned"
     # Nothing was recreated under the deleted match's run dir.
+    assert not (settings.run_root / tid).exists()
+
+
+def test_analysis_abandoned_on_delete_during_write(
+    settings, engine_factory, tournament_factory, monkeypatch
+):
+    """TOCTOU window: the match vanishes between the existence check and the
+    artifact write.  The writer never mkdirs, so the run dir must not come
+    back to life."""
+    tid, gid = _completed_game(settings, engine_factory, tournament_factory)
+    with engine_factory() as session:
+        game = session.query(Game).filter(Game.id == gid).one()
+        analysis.request_analysis(settings, game)
+    # Force the existence check to pass (simulating the check-before-delete
+    # interleaving) while the run dir is already gone.
+    monkeypatch.setattr(analysis, "_match_still_exists", lambda s, g: True)
+    shutil.rmtree(settings.run_root / tid, ignore_errors=True)
+    assert not (settings.run_root / tid).exists()
+    with engine_factory() as session:
+        outcome = analysis.run_analysis(settings, session, game)
+        assert outcome == "abandoned"
     assert not (settings.run_root / tid).exists()

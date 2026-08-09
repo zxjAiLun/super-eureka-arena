@@ -660,8 +660,9 @@ def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
     # Write an analysis artifact covering plies 0..6 (6 moves in SAMPLE_PGN).
     # Scores crafted so move 1 (e4, White) and move 4 (Qxd5, Black) are clear
     # winning-share blunders (loss >= 0.35), move 5 (Nc3) a mistake; the
-    # biggest swing is move 4.
-    scores = [50, -350, -300, -180, 250, -20, -100]
+    # biggest swing is move 4.  The final position has NO evaluation: unknown
+    # must never be classified as a blunder or an exactly equal position.
+    scores = [50, -350, -300, -180, 250, -20, None]
     positions = []
     board = chess.Board()
     fens = [board.fen()]
@@ -742,12 +743,19 @@ def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
             assert "+0.50" in score.inner_text(), "ply 0 score wrong after back"
 
             # P4.9b/c: move marks — ply 1 (White e4) ??, ply 4 (Black Qxd5) ??,
-            # ply 5 (White Nc3) ? (mistake).
+            # ply 5 (White Nc3) ? (mistake).  The final move (ply 6) has an
+            # unknown evaluation and must NOT get a mark.
             marks = page.locator(".move-mark")
             assert marks.count() == 3, f"expected 3 move marks, got {marks.count()}"
             assert marks.nth(0).inner_text() == "??"
             assert marks.nth(1).inner_text() == "??"
             assert marks.nth(2).inner_text() == "?"
+            # Unknown eval on the final ply renders as a dash, not "-M0" or 0.
+            page.keyboard.press("End")
+            page.wait_for_timeout(200)
+            assert score.inner_text().strip().startswith("\u2014"), (
+                f"unknown eval should render as dash, got {score.inner_text()!r}"
+            )
 
             # Biggest swing button jumps to ply 4 (Qxd5, the larger drop).
             biggest_btn = page.locator(".analysis-actions button", has_text="Biggest swing")
@@ -826,9 +834,12 @@ def test_browser_match_filters(settings, engine_factory, registered):
             requested_pairs=3,
             completed_pairs=3,
             config_snapshot={
-                "engine_a": {"display_name": "ChessEngine Production",
+                # Both sides share a display name: the filter must still tell
+                # Engine A apart via the pair color contract (game_number
+                # parity), never via display-name comparison.
+                "engine_a": {"display_name": "SameEngine",
                              "build_id": manifest["build_id"], "profile": "current-final"},
-                "engine_b": {"display_name": "ChessEngine Legacy Baseline",
+                "engine_b": {"display_name": "SameEngine",
                              "build_id": manifest["build_id"], "profile": "current"},
                 "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
                 "time_control": "blitz_3_2",
@@ -849,9 +860,10 @@ def test_browser_match_filters(settings, engine_factory, registered):
         session.flush()
 
         games_spec = [
-            ("ChessEngine Production", "ChessEngine Legacy Baseline", "1-0", True),
-            ("ChessEngine Legacy Baseline", "ChessEngine Production", "1-0", False),
-            ("ChessEngine Production", "ChessEngine Legacy Baseline", "1/2-1/2", False),
+            # game_number odd -> Engine A is White.
+            ("SameEngine", "SameEngine", "1-0", True),      # A white wins
+            ("SameEngine", "SameEngine", "1-0", False),     # A black loses
+            ("SameEngine", "SameEngine", "1/2-1/2", False), # draw
         ]
         gids = []
         for i, (white, black, result, analyzed) in enumerate(games_spec):

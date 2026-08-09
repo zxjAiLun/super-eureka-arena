@@ -26,16 +26,31 @@ const BLUNDER = 0.35;
 
 function formatScoreOf(p) {
   if (!p) return null;
-  if (p.mate != null) return p.mate > 0 ? `M${p.mate}` : `-M${Math.abs(p.mate)}`;
+  if (p.mate != null) {
+    if (p.mate === 0) return null; // invalid mate score is not an evaluation
+    return p.mate > 0 ? `M${p.mate}` : `-M${Math.abs(p.mate)}`;
+  }
   if (p.score_cp == null) return null;
   const v = p.score_cp / 100;
   return (v > 0 ? "+" : "") + v.toFixed(2);
 }
 
-function whiteShareOf(p) {
-  if (p.mate != null) return p.mate > 0 ? 0.98 : 0.02;
-  if (p.score_cp == null) return 0.5;
+// Strict winning share for swing classification: null when the evaluation is
+// unknown — never treated as an exactly equal position.
+function shareOf(p) {
+  if (!p) return null;
+  if (p.mate != null) {
+    if (p.mate === 0) return null;
+    return p.mate > 0 ? 0.98 : 0.02;
+  }
+  if (p.score_cp == null) return null;
   return Math.min(0.98, Math.max(0.02, 1 / (1 + Math.exp(-p.score_cp / 250))));
+}
+
+// UI-safe share: unknown evaluations render as a neutral bar.
+function shareForUi(p) {
+  const s = shareOf(p);
+  return s == null ? 0.5 : s;
 }
 
 function moveMark(loss) {
@@ -221,34 +236,50 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   }, [ply, status]);
 
   // P4.9b/c: per-move winning-share swing from the mover's perspective.
+  // Moves with an unknown evaluation on either side are marked `known: false`
+  // and never participate in classification or the biggest-swing search.
   const swings = useMemo(() => {
     if (!analysis?.positions?.length) return [];
     const positions = analysis.positions;
     const out = [];
     for (let i = 1; i < positions.length; i++) {
-      const before = whiteShareOf(positions[i - 1]);
-      const after = whiteShareOf(positions[i]);
+      const before = shareOf(positions[i - 1]);
+      const after = shareOf(positions[i]);
+      if (before == null || after == null) {
+        out.push({ ply: i, loss: 0, known: false });
+        continue;
+      }
       // Odd ply = White's move, even ply = Black's move.
       const loss = i % 2 === 1 ? before - after : after - before;
-      out.push({ ply: i, loss });
+      out.push({ ply: i, loss, known: true });
     }
     return out;
   }, [analysis]);
 
   const errorPlies = useMemo(
-    () => swings.filter((s) => s.loss >= INACCURACY).map((s) => s.ply),
+    () =>
+      swings
+        .filter((s) => s.known && s.loss >= INACCURACY)
+        .map((s) => s.ply),
     [swings]
   );
   const biggest = useMemo(
     () =>
-      swings.reduce(
-        (best, s) => (s.loss > best.loss ? s : best),
-        { ply: 0, loss: 0 }
-      ),
+      swings
+        .filter((s) => s.known)
+        .reduce(
+          (best, s) => (s.loss > best.loss ? s : best),
+          { ply: 0, loss: 0, known: false }
+        ),
     [swings]
   );
+  const moveLabel = (ply) => {
+    const n = Math.ceil(ply / 2);
+    const san = moves[ply - 1]?.san ?? "";
+    return ply % 2 === 1 ? `${n}.${san}` : `${n}...${san}`;
+  };
   const biggestText = biggest.ply
-    ? `${moves[biggest.ply - 1]?.san ?? ""} ${formatScoreOf(
+    ? `${moveLabel(biggest.ply)} ${formatScoreOf(
         analysis?.positions?.[biggest.ply - 1]
       )} → ${formatScoreOf(analysis?.positions?.[biggest.ply])}`
     : "";
@@ -261,6 +292,12 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   const prevError = () => {
     const prev = [...errorPlies].reverse().find((p) => p < ply);
     setPly(prev ?? errorPlies[errorPlies.length - 1] ?? ply);
+  };
+  // Classification mark for the move ending at swing index `idx`; moves with
+  // an unknown evaluation never get a mark.
+  const markFor = (idx) => {
+    const s = swings[idx];
+    return s && s.known ? moveMark(s.loss) : "";
   };
 
   if (status === "loading") {
@@ -315,7 +352,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
             <div className="eval-bar" aria-label="Evaluation">
               <div
                 className="eval-bar-white"
-                style={{ height: `${whiteShareOf(pos) * 100}%` }}
+                style={{ height: `${shareForUi(pos) * 100}%` }}
               />
             </div>
           )}
@@ -430,15 +467,13 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
                 type="button"
                 className={"move" + (ply === r.n * 2 - 1 ? " active" : "")}
                 onClick={() => setPly(r.n * 2 - 1)}
-                title={moveMark(swings[r.n * 2 - 2]?.loss)
+                title={markFor(r.n * 2 - 2)
                   ? "Arena classification · evaluation swing"
                   : ""}
               >
                 {r.white.san}
-                {moveMark(swings[r.n * 2 - 2]?.loss) && (
-                  <span className="move-mark">
-                    {moveMark(swings[r.n * 2 - 2].loss)}
-                  </span>
+                {markFor(r.n * 2 - 2) && (
+                  <span className="move-mark">{markFor(r.n * 2 - 2)}</span>
                 )}
               </button>
               {r.black && (
@@ -446,15 +481,13 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
                   type="button"
                   className={"move" + (ply === r.n * 2 ? " active" : "")}
                   onClick={() => setPly(r.n * 2)}
-                  title={moveMark(swings[r.n * 2 - 1]?.loss)
+                  title={markFor(r.n * 2 - 1)
                     ? "Arena classification · evaluation swing"
                     : ""}
                 >
                   {r.black.san}
-                  {moveMark(swings[r.n * 2 - 1]?.loss) && (
-                    <span className="move-mark">
-                      {moveMark(swings[r.n * 2 - 1].loss)}
-                    </span>
+                  {markFor(r.n * 2 - 1) && (
+                    <span className="move-mark">{markFor(r.n * 2 - 1)}</span>
                   )}
                 </button>
               )}

@@ -135,9 +135,14 @@ def run_analysis(settings: Settings, session, game: Game) -> str:
             "error": str(exc),
             "failed_at": utcnow().isoformat(),
         }
-        err = error_path(game.tournament_id, game.id)
-        err.parent.mkdir(parents=True, exist_ok=True)
-        err.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        try:
+            err = error_path(game.tournament_id, game.id)
+            # Same no-mkdir rule as the result writer (see _analyze).
+            err.write_text(
+                json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+            )
+        except FileNotFoundError:
+            return "abandoned"
         return "failed"
 
 
@@ -228,14 +233,24 @@ def _analyze(settings: Settings, session, game: Game) -> None:
         "positions": positions,
     }
     out = result_path(game.tournament_id, game.id)
-    if not _match_still_exists(session, game):
-        # The match (or its run dir) was deleted while analyzing: do not
-        # recreate artifacts for a match that no longer exists.
-        raise AnalysisAbandoned()
-    out.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
-    tmp.replace(out)
+    # The analysis dir is created by request_analysis; the writer never mkdirs
+    # so a concurrent match delete (which removes the run dir) can never
+    # resurrect it.  A FileNotFoundError here means the match vanished in the
+    # TOCTOU window between the check above and the write -> abandon.
+    try:
+        if not _match_still_exists(session, game):
+            raise AnalysisAbandoned()
+        tmp = out.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(artifact, indent=2) + "\n", encoding="utf-8")
+        if not _match_still_exists(session, game):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            raise AnalysisAbandoned()
+        tmp.replace(out)
+    except FileNotFoundError as exc:
+        raise AnalysisAbandoned() from exc
 
 
 def read_analysis(game: Game) -> Optional[dict]:
@@ -379,7 +394,11 @@ def _write_and_wait(proc: subprocess.Popen, reader, cmd: str,
 
 
 def _read_until(reader: queue.Queue, terminator: str,
-                timeout: float = SEARCH_TIMEOUT) -> list[str]:
+                timeout: Optional[float] = None) -> list[str]:
+    """Read lines until ``terminator`` or a wall-clock deadline.  The default
+    is read at call time so tests can monkeypatch SEARCH_TIMEOUT."""
+    if timeout is None:
+        timeout = SEARCH_TIMEOUT
     lines: list[str] = []
     deadline = time.monotonic() + timeout
     while True:
