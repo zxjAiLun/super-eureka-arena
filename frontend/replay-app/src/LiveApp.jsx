@@ -72,15 +72,22 @@ export default function LiveApp({ tournamentId, basePath }) {
   const { phase, payload } = useLive({ basePath, tournamentId });
   const [boardSize, setBoardSize] = useState(480);
   const replayRef = useRef(null);
-  // Local clock tick so clocks count down between 1.5s polls.
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  // Clock countdown: anchored at the moment the last payload arrived; only
+  // the side to move keeps ticking between 1.5s polls.
+  const [receivedAt, setReceivedAt] = useState(() => Date.now());
+  const [renderNow, setRenderNow] = useState(() => Date.now());
 
   // Hooks must be called unconditionally (before any early return).
   useEffect(() => {
-    setNowMs(Date.now());
-    const id = setInterval(() => setNowMs(Date.now()), 250);
+    setReceivedAt(Date.now());
+    const id = setInterval(() => setRenderNow(Date.now()), 250);
     return () => clearInterval(id);
   }, [phase]);
+
+  // Re-anchor the countdown whenever a new payload arrives.
+  useEffect(() => {
+    if (phase === "live") setReceivedAt(Date.now());
+  }, [phase, payload]);
 
   // Hooks must be called unconditionally (before any early return).  Size the
   // board to fit the available height; no-op while there is no board.
@@ -142,10 +149,12 @@ export default function LiveApp({ tournamentId, basePath }) {
   const white = payload.white;
   const black = payload.black;
   const hasTelemetry = Boolean(payload.current_fen && white && black);
+  const activeIsWhite = payload.side_to_move === "w";
 
-  const clockOf = (side) => {
+  const clockOf = (side, isActive) => {
     if (!side || side.clock_ms == null) return null;
-    const remaining = Math.max(0, side.clock_ms - (Date.now() - nowMs));
+    const elapsed = Math.max(0, renderNow - receivedAt);
+    const remaining = isActive ? Math.max(0, side.clock_ms - elapsed) : side.clock_ms;
     const total = Math.round(remaining / 1000);
     const m = Math.floor(total / 60);
     const s = total % 60;
@@ -191,14 +200,18 @@ export default function LiveApp({ tournamentId, basePath }) {
         <div className="player-card top">
           <span className="color-dot black" />
           <span className="player-name">{black ? black.label : payload.engine_b_label}</span>
-          {clockOf(black) && <span className="live-clock">{clockOf(black)}</span>}
+          {clockOf(black, hasTelemetry && !activeIsWhite) && (
+            <span className="live-clock">{clockOf(black, hasTelemetry && !activeIsWhite)}</span>
+          )}
         </div>
         <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
           <Chessboard options={{ position: fen, allowDragging: false }} />
         </div>
         <div className="player-card bottom">
           <span className="player-name">{white ? white.label : payload.engine_a_label}</span>
-          {clockOf(white) && <span className="live-clock">{clockOf(white)}</span>}
+          {clockOf(white, hasTelemetry && activeIsWhite) && (
+            <span className="live-clock">{clockOf(white, hasTelemetry && activeIsWhite)}</span>
+          )}
           <span className="color-dot white" />
         </div>
         {inProgress && (

@@ -20,7 +20,6 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import (
     COMPLETED,
-    PAUSED,
     PAUSING,
     QUEUED,
     RUNNING,
@@ -297,18 +296,33 @@ def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
         pass
 
     engines = telemetry.get("engines") or {}
-    go_for = telemetry.get("go_for") or {}
-    if not go_for:
+    go = telemetry.get("go") or {}
+    if not go:
         return  # no engine search stream yet (e.g. pre-P4.11 matches)
     a_label = payload["engine_a_label"]
     b_label = payload["engine_b_label"]
+    active = telemetry.get("active_engine")
 
-    def _side(label: str) -> LiveSideOut:
-        eng = engines.get(label) or {}
-        clk = go_for.get(label) or {}
+    def _clock_ms(color: str) -> Optional[int]:
+        """White/Black absolute clock from the latest go, minus the active
+        engine's current search time (info time)."""
+        base = go.get("wtime") if color == "w" else go.get("btime")
+        if base is None:
+            return None
+        if active is not None:
+            eng = engines.get(active) or {}
+            time_ms = eng.get("time_ms")
+            # The active engine is the side to move: its clock only runs down
+            # for the color that is to move.
+            if state_side == color and time_ms is not None:
+                return max(0, base - time_ms)
+        return base
+
+    def _side(index: int, label: str, color: str) -> LiveSideOut:
+        eng = engines.get(index) or {}
         return LiveSideOut(
             label=label,
-            clock_ms=clk.get("own_ms"),
+            clock_ms=_clock_ms(color),
             eval_cp=eng.get("eval_cp"),
             mate=eng.get("mate"),
             depth=eng.get("depth"),
@@ -318,21 +332,18 @@ def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
         )
 
     # Colors follow the pair contract: game 1 (odd game_in_pair) -> engine A
-    # white, game 2 -> engine A black.  game_in_pair comes from the runtime
-    # status; fall back to the debug position's side-to-move when unavailable.
+    # white, game 2 -> engine A black.  Engine index 0 is always engine A.
+    state_side = payload.get("side_to_move")
     game_in_pair = payload.get("game_in_pair")
     if game_in_pair is not None:
         a_white = game_in_pair % 2 == 1
+    elif state_side is not None:
+        # Fallback: the active engine is the side to move.
+        a_white = not (active == 0)
     else:
-        a_white = None
-        for name, go in go_for.items():
-            if go.get("side") == "w":
-                a_white = name == a_label
-                break
-    if a_white is None:
         return
-    payload["white"] = _side(a_label if a_white else b_label)
-    payload["black"] = _side(b_label if a_white else a_label)
+    payload["white"] = _side(0 if a_white else 1, a_label if a_white else b_label, "w")
+    payload["black"] = _side(1 if a_white else 0, b_label if a_white else a_label, "b")
 
 
 @router.get("/live", response_model=LiveOut)
@@ -358,8 +369,10 @@ def get_live_status(
         return LiveOut(**_live_payload(session, settings, t))
     t = (
         session.query(Tournament)
+        # PAUSED sits on a pair boundary with no live game; only queued,
+        # running and pausing matches are live-watchable.
         .filter(
-            Tournament.status.in_([QUEUED, RUNNING, PAUSING, PAUSED])
+            Tournament.status.in_([QUEUED, RUNNING, PAUSING])
         )
         .order_by(Tournament.started_at.desc())
         .first()

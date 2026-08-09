@@ -195,6 +195,29 @@ def test_stdout_forbidden_term_fails(settings, engine_factory, pair_context):
         _verify(settings, engine_factory, pair_context, run_dir)
 
 
+def test_prefixed_debug_transport_ignored(settings, engine_factory,
+                                          pair_context, pair_run):
+    """P4.11: a cutechess -debug transport line with a leading message counter
+    (e.g. "4 <EngineA(0): info string error foo") must be skipped even when
+    it contains a forbidden word."""
+    log = pair_run / "stdout.log"
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write("4 <EngineA(0): info string error foo\n")
+    verification = _verify(settings, engine_factory, pair_context, pair_run)
+    assert verification["verified"] is True
+
+
+def test_unprefixed_error_line_rejected(settings, engine_factory,
+                                        pair_context, pair_run):
+    """A real (non-transport) stdout line containing a forbidden word must
+    still fail verification."""
+    log = pair_run / "stdout.log"
+    with log.open("a", encoding="utf-8") as fh:
+        fh.write("error happened in the match\n")
+    with pytest.raises(verifier.VerificationFailure, match="forbidden"):
+        _verify(settings, engine_factory, pair_context, run_dir=pair_run)
+
+
 def test_stderr_bad_line_fails(settings, engine_factory, pair_context):
     run_dir = helpers.run_fake_pair(
         settings,

@@ -254,11 +254,14 @@ def verify_pair(
             f"cutechess score {score_line} disagrees with recomputed {computed}"
         )
 
-    # stdout forbidden words (section 14.12).  Lines starting with '>' or '<'
-    # are cutechess -debug transport (engine input/output, P4.11 live
-    # telemetry) and are skipped; the match-facing lines are still scanned.
+    # stdout forbidden words (section 14.12).  cutechess -debug transport
+    # lines (P4.11 live telemetry) carry a leading counter + '>' / '<'
+    # (e.g. "4 >Engine(0): ...") and are skipped via the same shared predicate
+    # the telemetry parser uses; match-facing lines are still scanned.
+    from .live_telemetry import is_debug_transport_line
+
     for line in stdout_lines:
-        if line.startswith((">", "<")):
+        if is_debug_transport_line(line):
             continue
         lower = line.lower()
         if any(word in lower for word in FORBIDDEN_STDOUT):
