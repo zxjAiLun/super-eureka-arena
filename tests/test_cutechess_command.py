@@ -85,8 +85,9 @@ def test_pair_command_structure(settings: Settings):
     assert "-variant standard" in joined
     assert "format=epd" in joined
     assert "order=sequential" in joined
-    # No debug/recover in v1 (spec section 12).
-    assert "-debug" not in joined
+    # P4.11: -debug all enables the live telemetry engine stream (the verifier
+    # skips its '>' / '<' transport lines); -recover stays off.
+    assert "-debug all" in joined
     assert "-recover" not in joined
 
 

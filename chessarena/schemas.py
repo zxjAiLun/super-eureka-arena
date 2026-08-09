@@ -211,9 +211,24 @@ class PublicAnalysisOut(BaseModel):
     positions: List[PublicAnalysisPositionOut]
 
 
+class LiveSideOut(BaseModel):
+    """One side of the live view (P4.11): label, clock and the engine's own
+    latest self-evaluation from the cutechess debug stream."""
+
+    label: str
+    clock_ms: Optional[int] = None
+    eval_cp: Optional[int] = None
+    mate: Optional[int] = None
+    depth: Optional[int] = None
+    nodes: Optional[int] = None
+    nps: Optional[int] = None
+    pv: List[str] = Field(default_factory=list)
+
+
 class LiveOut(BaseModel):
-    """Live match status (P4.3 v1).  Only whitelisted display fields; never
-    exposes build ids, binary SHAs, paths, logs or provenance.
+    """Live match status (P4.3 v1 + P4.11 live telemetry).  Only whitelisted
+    display fields; never exposes build ids, binary SHAs, paths, logs or
+    provenance.
 
     ``status`` is one of:
       idle       no current match to watch
@@ -240,3 +255,11 @@ class LiveOut(BaseModel):
     candidate_losses: Optional[int] = None
     draws: Optional[int] = None
     match_url: Optional[str] = None
+    # P4.11 live telemetry (only present when the debug stream is available).
+    current_fen: Optional[str] = None
+    side_to_move: Optional[str] = None
+    last_move: Optional[str] = None
+    ply: Optional[int] = None
+    telemetry_age_s: Optional[int] = None
+    white: Optional[LiveSideOut] = None
+    black: Optional[LiveSideOut] = None

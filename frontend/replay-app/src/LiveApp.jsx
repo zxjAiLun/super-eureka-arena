@@ -72,6 +72,15 @@ export default function LiveApp({ tournamentId, basePath }) {
   const { phase, payload } = useLive({ basePath, tournamentId });
   const [boardSize, setBoardSize] = useState(480);
   const replayRef = useRef(null);
+  // Local clock tick so clocks count down between 1.5s polls.
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // Hooks must be called unconditionally (before any early return).
+  useEffect(() => {
+    setNowMs(Date.now());
+    const id = setInterval(() => setNowMs(Date.now()), 250);
+    return () => clearInterval(id);
+  }, [phase]);
 
   // Hooks must be called unconditionally (before any early return).  Size the
   // board to fit the available height; no-op while there is no board.
@@ -125,24 +134,71 @@ export default function LiveApp({ tournamentId, basePath }) {
     );
   }
 
-  const fen = payload.opening_fen || START_FEN;
+  // P4.11: the board shows the REAL position from the engine protocol stream
+  // when telemetry is available, falling back to the pair's opening FEN.
+  const fen = payload.current_fen || payload.opening_fen || START_FEN;
   const inProgress =
-    payload.state === "game_running" ||
-    payload.state === "pending" ||
-    payload.state === "pair_done";
+    payload.state === "game_running" || payload.state === "pending";
+  const white = payload.white;
+  const black = payload.black;
+  const hasTelemetry = Boolean(payload.current_fen && white && black);
+
+  const clockOf = (side) => {
+    if (!side || side.clock_ms == null) return null;
+    const remaining = Math.max(0, side.clock_ms - (Date.now() - nowMs));
+    const total = Math.round(remaining / 1000);
+    const m = Math.floor(total / 60);
+    const s = total % 60;
+    return `${m}:${String(s).padStart(2, "0")}`;
+  };
+
+  const evalText = (side) => {
+    if (!side) return null;
+    if (side.mate != null && side.mate !== 0) {
+      return side.mate > 0 ? `M${side.mate}` : `-M${Math.abs(side.mate)}`;
+    }
+    if (side.eval_cp == null) return null;
+    const v = side.eval_cp / 100;
+    return (v > 0 ? "+" : "") + v.toFixed(2);
+  };
+
+  const enginePanel = (side) => {
+    if (!side) return null;
+    return (
+      <div className="live-engine" key={side.label}>
+        <div className="live-engine-line">
+          <span className="live-engine-eval">{evalText(side) ?? "—"}</span>
+          <span className="live-engine-name">{side.label}</span>
+          {side.depth != null && <span className="live-engine-meta">d{side.depth}</span>}
+          {side.nps != null && (
+            <span className="live-engine-meta">
+              {(side.nps / 1e6).toFixed(1)}Mn
+            </span>
+          )}
+        </div>
+        {side.pv && side.pv.length > 0 && (
+          <div className="live-engine-pv">
+            PV: {side.pv.map((u) => u).join(" ")}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="replay" ref={replayRef}>
       <div className="replay-board-col">
         <div className="player-card top">
           <span className="color-dot black" />
-          <span className="player-name">{payload.engine_a_label}</span>
+          <span className="player-name">{black ? black.label : payload.engine_b_label}</span>
+          {clockOf(black) && <span className="live-clock">{clockOf(black)}</span>}
         </div>
         <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
           <Chessboard options={{ position: fen, allowDragging: false }} />
         </div>
         <div className="player-card bottom">
-          <span className="player-name">{payload.engine_b_label}</span>
+          <span className="player-name">{white ? white.label : payload.engine_a_label}</span>
+          {clockOf(white) && <span className="live-clock">{clockOf(white)}</span>}
           <span className="color-dot white" />
         </div>
         {inProgress && (
@@ -151,9 +207,24 @@ export default function LiveApp({ tournamentId, basePath }) {
       </div>
       <div className="replay-side-col">
         <Badges data={payload} />
+        {hasTelemetry && (
+          <>
+            <div className="live-meta">
+              {payload.side_to_move === "w" ? "White" : "Black"} to move
+              {payload.last_move ? ` · last ${payload.last_move}` : ""}
+              {payload.ply != null ? ` · ply ${payload.ply}` : ""}
+              {payload.telemetry_age_s != null
+                ? ` · stream ${payload.telemetry_age_s}s old`
+                : ""}
+            </div>
+            {enginePanel(white)}
+            {enginePanel(black)}
+          </>
+        )}
         <p className="demo-note">
-          Position shown is the opening of the current pair. The authoritative
-          result appears once the pair passes verification.
+          {hasTelemetry
+            ? "Live position from the match engine stream. The authoritative result appears once the pair passes verification."
+            : "Position shown is the opening of the current pair. The authoritative result appears once the pair passes verification."}
         </p>
       </div>
     </div>

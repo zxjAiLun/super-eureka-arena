@@ -210,6 +210,12 @@ def build_pair_command(
         str(pgn_out),
         "-resultformat",
         "short",
+        # P4.11 live telemetry: cutechess streams all engine input/output
+        # (position/go wtime/btime, info score/depth/nodes/nps/pv, bestmove)
+        # to stdout, which services/live_telemetry.py parses for the public
+        # live viewer.  The verifier skips these '>' / '<' transport lines.
+        "-debug",
+        "all",
     ]
     return argv
 

@@ -133,6 +133,58 @@
   padding: 0.15rem 0.7rem;
 }
 
+/* P4.11 live telemetry */
+.live-clock {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  color: #e6edf3;
+}
+
+.live-meta {
+  font-size: 0.8rem;
+  color: #9aa4b2;
+}
+
+.live-engine {
+  background: #1c222b;
+  border: 1px solid #2d343f;
+  border-radius: 10px;
+  padding: 0.5rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.live-engine-line {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.live-engine-eval {
+  font-weight: 700;
+  color: #e6edf3;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-engine-name {
+  font-size: 0.85rem;
+  color: #c9d4e0;
+}
+
+.live-engine-meta {
+  font-size: 0.72rem;
+  color: #6b7480;
+}
+
+.live-engine-pv {
+  font-size: 0.78rem;
+  color: #9aa4b2;
+  word-break: break-word;
+}
+
 .player-card {
   display: flex;
   align-items: center;

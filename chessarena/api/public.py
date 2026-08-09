@@ -20,6 +20,8 @@ from ..config import get_settings
 from ..db import get_db
 from ..models import (
     COMPLETED,
+    PAUSED,
+    PAUSING,
     QUEUED,
     RUNNING,
     EngineBuild,
@@ -29,6 +31,7 @@ from ..models import (
 )
 from ..schemas import (
     LiveOut,
+    LiveSideOut,
     PublicAnalysisOut,
     PublicGameOut,
     PublicMatchDetailOut,
@@ -250,7 +253,7 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
         op = run_dir / "opening.epd"
         if op.is_file():
             opening_fen = op.read_text(encoding="utf-8").strip() or None
-        return {
+        payload = {
             **base,
             "status": "live",
             "pair_index": pair.pair_index,
@@ -260,7 +263,64 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
             "last_result": runtime.get("last_result"),
             "opening_fen": opening_fen,
         }
+        _attach_live_telemetry(payload, run_dir, opening_fen)
+        return payload
     return {**base, "status": "live"}
+
+
+def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
+    """P4.11: parse the cutechess -debug stream and fill the live fields.
+
+    The current position is the real one from the engine protocol stream
+    (falls back to the pair's opening FEN when the stream is unavailable);
+    colors follow the pair contract: debug game 0 = engine A white."""
+    import time as _time
+
+    from ..services.live_telemetry import parse_live_state
+
+    stdout = run_dir / "stdout.log"
+    if not stdout.is_file():
+        return
+    try:
+        telemetry = parse_live_state(stdout)
+    except Exception:
+        return
+    payload["current_fen"] = telemetry.get("current_fen") or opening_fen
+    payload["side_to_move"] = telemetry.get("side_to_move")
+    payload["last_move"] = telemetry.get("last_move")
+    payload["ply"] = telemetry.get("ply")
+    try:
+        payload["telemetry_age_s"] = int(
+            _time.time() - stdout.stat().st_mtime
+        )
+    except OSError:
+        pass
+
+    game = telemetry.get("game")
+    if game is None:
+        return  # no debug stream yet (e.g. pre-P4.11 matches)
+    a_label = payload["engine_a_label"]
+    b_label = payload["engine_b_label"]
+    engines = telemetry.get("engines") or {}
+    clocks = telemetry.get("clocks") or {}
+
+    def _side(label: str) -> LiveSideOut:
+        eng = engines.get(label) or {}
+        clk = clocks.get(label) or {}
+        return LiveSideOut(
+            label=label,
+            clock_ms=clk.get("own_ms"),
+            eval_cp=eng.get("eval_cp"),
+            mate=eng.get("mate"),
+            depth=eng.get("depth"),
+            nodes=eng.get("nodes"),
+            nps=eng.get("nps"),
+            pv=eng.get("pv") or [],
+        )
+
+    a_white = game % 2 == 0
+    payload["white"] = _side(a_label if a_white else b_label)
+    payload["black"] = _side(b_label if a_white else a_label)
 
 
 @router.get("/live", response_model=LiveOut)
@@ -286,7 +346,9 @@ def get_live_status(
         return LiveOut(**_live_payload(session, settings, t))
     t = (
         session.query(Tournament)
-        .filter(Tournament.status.in_([QUEUED, RUNNING]))
+        .filter(
+            Tournament.status.in_([QUEUED, RUNNING, PAUSING, PAUSED])
+        )
         .order_by(Tournament.started_at.desc())
         .first()
     )

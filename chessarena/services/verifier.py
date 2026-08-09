@@ -254,8 +254,12 @@ def verify_pair(
             f"cutechess score {score_line} disagrees with recomputed {computed}"
         )
 
-    # stdout forbidden words (section 14.12)
+    # stdout forbidden words (section 14.12).  Lines starting with '>' or '<'
+    # are cutechess -debug transport (engine input/output, P4.11 live
+    # telemetry) and are skipped; the match-facing lines are still scanned.
     for line in stdout_lines:
+        if line.startswith((">", "<")):
+            continue
         lower = line.lower()
         if any(word in lower for word in FORBIDDEN_STDOUT):
             raise VerificationFailure(
