@@ -28,10 +28,15 @@ import chess
 # <counter> >Name(index): payload  /  <counter> <Name(index): payload
 _DEBUG_RE = re.compile(r"^\s*\d*\s*([<>])(.+?)\((\d+)\): (.*)$")
 _STARTED_RE = re.compile(r"^Started game (\d+) of (\d+)")
+_FINISHED_RE = re.compile(r"^Finished game (\d+) \((.+?)\): (\S+)")
 
 # Hard cap on the tail read; the file is opened and seeked so a 50MB
-# -debug log is never read in full on every 1.5s poll.
-_TAIL_BYTES = 1_000_000
+# -debug log is never read in full on every 1.5s poll.  The window covers a
+# typical game's full traffic (a blitz game is well under 2MB of debug
+# lines), so the current game's boundary line stays visible; when the log
+# outgrows the window the live page fails closed (no game badge, no side
+# boards) rather than guess.
+_TAIL_BYTES = 2_000_000
 
 
 def is_debug_transport_line(line: str) -> bool:
@@ -59,6 +64,8 @@ def parse_live_state(stdout_path: Path) -> dict:
 
     Returns:
       current_fen, side_to_move, last_move, ply, game_in_pair (1-based),
+      state (pending | game_running | pair_done), last_result,
+      has_debug (a -debug stream is present in the read window),
       engines: {index: {eval_cp, mate, depth, nodes, nps, time_ms, pv}},
       go:      {"wtime": ms, "btime": ms} from the LATEST ``go`` (White's and
                Black's absolute clocks), active_engine: index of the engine
@@ -70,6 +77,9 @@ def parse_live_state(stdout_path: Path) -> dict:
         "last_move": None,
         "ply": None,
         "game_in_pair": None,
+        "state": "pending",
+        "last_result": None,
+        "has_debug": False,
         "engines": _empty_engines(),
         "go": {},
         "active_engine": None,
@@ -79,11 +89,15 @@ def parse_live_state(stdout_path: Path) -> dict:
 
     position_fen: Optional[str] = None
     position_moves: list[str] = []
+    finished: dict[int, str] = {}
+    total_games: int = 2
+    debug_lines = 0
     for line in _read_tail(stdout_path).splitlines():
         m = _STARTED_RE.match(line)
         if m:
             # New game boundary: reset all per-game telemetry.
             state["game_in_pair"] = int(m.group(1))
+            total_games = int(m.group(2))
             state["current_fen"] = None
             state["side_to_move"] = None
             state["last_move"] = None
@@ -94,9 +108,14 @@ def parse_live_state(stdout_path: Path) -> dict:
             position_fen = None
             position_moves = []
             continue
+        m = _FINISHED_RE.match(line)
+        if m:
+            finished[int(m.group(1))] = m.group(3)
+            continue
         m = _DEBUG_RE.match(line)
         if not m:
             continue
+        debug_lines += 1
         direction, name, idx, payload = (
             m.group(1), m.group(2), int(m.group(3)), m.group(4),
         )
@@ -192,6 +211,13 @@ def parse_live_state(stdout_path: Path) -> dict:
 
     if position_moves and state["last_move"] is None:
         state["last_move"] = position_moves[-1]
+    state["has_debug"] = debug_lines > 0
+    if finished:
+        state["last_result"] = finished[max(finished)]
+    if len(finished) >= total_games:
+        state["state"] = "pair_done"
+    elif state["game_in_pair"] is not None:
+        state["state"] = "game_running"
     return state
 
 

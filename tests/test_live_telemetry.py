@@ -42,6 +42,9 @@ def _write_debug(tmp_path: Path, text: str = DEBUG_LINES) -> Path:
 def test_parse_live_state_full_fen_and_engines(tmp_path):
     state = live_telemetry.parse_live_state(_write_debug(tmp_path))
     assert state["game_in_pair"] == 1
+    assert state["state"] == "game_running"
+    assert state["has_debug"] is True
+    assert state["last_result"] is None
     assert state["ply"] == 1
     assert state["last_move"] == "g1f3"
     # The full 6-field FEN is preserved: black to move after g1f3, castling
@@ -104,10 +107,84 @@ def test_parse_live_state_game_boundary_resets(tmp_path):
     assert state["go"]["wtime"] == 179500
 
 
+def test_parse_live_state_finished_lines(tmp_path):
+    """Finished game lines drive last_result / state without a full-file
+    scan: they sit inside the bounded tail read."""
+    text = "\n".join(
+        [
+            "Started game 1 of 2 (A vs B)",
+            f"4 >A(0): position fen {OPENING}",
+            "6 >A(0): go wtime 180000 btime 180000 winc 2000 binc 2000",
+            "8 <A(0): info depth 10 score cp 99 nodes 100 nps 1000 time 5 pv d2d4",
+            "10 <A(0): bestmove d2d4 ponder d7d5",
+            "Finished game 1 (A vs B): 1-0 {White mates}",
+            "Started game 2 of 2 (B vs A)",
+            "20 >B(1): position fen {} moves d7d5".format(OPENING),
+            "22 >B(1): go wtime 179500 btime 180000 winc 2000 binc 2000",
+        ]
+    )
+    state = live_telemetry.parse_live_state(_write_debug(tmp_path, text))
+    assert state["game_in_pair"] == 2
+    assert state["last_result"] == "1-0"
+    assert state["state"] == "game_running"  # game 2 in progress
+    # Pair fully finished -> pair_done.
+    done = text + "\nFinished game 2 (B vs A): 1/2-1/2\n"
+    state = live_telemetry.parse_live_state(_write_debug(tmp_path, done))
+    assert state["state"] == "pair_done"
+    assert state["last_result"] == "1/2-1/2"
+
+
+def test_parse_live_state_no_debug_stream(tmp_path):
+    """A pre-P4.11 log (only match-facing lines) has no debug stream."""
+    p = _write_debug(tmp_path, "Started game 1 of 2 (A vs B)\n")
+    state = live_telemetry.parse_live_state(p)
+    assert state["has_debug"] is False
+    assert state["state"] == "game_running"
+    assert state["current_fen"] is None
+
+
+def test_parse_live_state_tail_window(tmp_path):
+    """Game boundary lines near the end of a huge log are still seen: the
+    parser only ever reads a bounded tail window (never the full file)."""
+    head = ("1234567890" * 10 + "\n") * 30_000  # ~3MB of filler
+    tail = (
+        "Started game 2 of 2 (B vs A)\n"
+        "22 >B(1): go wtime 179500 btime 180000 winc 2000 binc 2000\n"
+    )
+    p = tmp_path / "stdout.log"
+    with p.open("w", encoding="utf-8") as fh:
+        fh.write(head)
+        fh.write(tail)
+    state = live_telemetry.parse_live_state(p)
+    assert state["game_in_pair"] == 2
+    assert state["has_debug"] is True
+    assert state["go"]["wtime"] == 179500
+
+
+def test_parse_live_state_boundary_outside_window(tmp_path):
+    """When the current game's boundary scrolled out of the bounded window
+    the live state fails closed instead of guessing (no game number, no
+    side_to_move)."""
+    head = "Started game 2 of 2 (B vs A)\n"
+    filler = ("1234567890" * 10 + "\n") * 400_000  # ~40MB after the boundary
+    tail = "22 >B(1): go wtime 179500 btime 180000 winc 2000 binc 2000\n"
+    p = tmp_path / "stdout.log"
+    with p.open("w", encoding="utf-8") as fh:
+        fh.write(head)
+        fh.write(filler)
+        fh.write(tail)
+    state = live_telemetry.parse_live_state(p)
+    assert state["game_in_pair"] is None
+    assert state["state"] == "pending"
+    assert state["go"]["wtime"] == 179500  # stream itself still live
+
+
 def test_parse_live_state_missing_file(tmp_path):
     state = live_telemetry.parse_live_state(tmp_path / "nope.log")
     assert state["current_fen"] is None
     assert state["engines"] == {0: {}, 1: {}}
+    assert state["has_debug"] is False
+    assert state["state"] == "pending"
 
 
 def test_live_endpoint_telemetry(settings, engine_factory, tournament_factory,
@@ -178,6 +255,78 @@ def test_live_endpoint_falls_back_to_opening_fen(
     body = r.json()
     assert body["current_fen"] == OPENING
     assert body["white"] is None
+
+
+def test_live_endpoint_fails_closed_without_game_boundary(
+    settings, engine_factory, tournament_factory, app_client
+):
+    """P4.11 repair: a debug stream without an authoritative Started game
+    line yields no side boards (colors are never guessed from side_to_move)."""
+    tid = tournament_factory(name="live-noboundary", pairs=1, status=RUNNING)
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        t.started_at = utcnow()
+        pair = t.pair_jobs[0]
+        pair.status = RUNNING
+        run_dir = settings.run_root / tid / "pairs" / "000000" / "attempt-01"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "opening.epd").write_text(OPENING + "\n", encoding="utf-8")
+        (run_dir / "stdout.log").write_text(
+            f"4 >A(0): position fen {OPENING}\n"
+            "6 >A(0): go wtime 180000 btime 180000 winc 2000 binc 2000\n"
+            "8 <A(0): info depth 10 score cp 99 nodes 100 nps 1000 time 5 pv d2d4\n",
+            encoding="utf-8",
+        )
+        pair.run_directory = str(run_dir)
+        session.commit()
+    r = app_client.get(f"/chessarena/public-api/v1/live?tournament_id={tid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current_fen"] == OPENING
+    assert body["game_in_pair"] is None
+    assert body["white"] is None
+    assert body["black"] is None
+
+
+def test_live_endpoint_telemetry_from_tail(settings, engine_factory,
+                                           tournament_factory, app_client):
+    """P4.11 repair: with a -debug stream the live endpoint reads game
+    boundaries from the bounded tail (never the full file)."""
+    tid = tournament_factory(name="live-tail", pairs=1, status=RUNNING)
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        t.started_at = utcnow()
+        snap = dict(t.config_snapshot or {})
+        snap["engine_a"] = {**snap.get("engine_a", {}),
+                            "display_name": "ChessEngine Production"}
+        snap["engine_b"] = {**snap.get("engine_b", {}),
+                            "display_name": "Stockfish Limited 2000"}
+        t.config_snapshot = snap
+        pair = t.pair_jobs[0]
+        pair.status = RUNNING
+        run_dir = settings.run_root / tid / "pairs" / "000000" / "attempt-01"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "opening.epd").write_text(OPENING + "\n", encoding="utf-8")
+        with (run_dir / "stdout.log").open("w", encoding="utf-8") as fh:
+            fh.write("Started game 2 of 2 (B vs A)\n")
+            fh.write("1234567890" * 10 + "\n")  # tiny placeholder; content
+            fh.write(
+                f"20 >B(1): position fen {OPENING} moves d7d5\n"
+                "22 >B(1): go wtime 179500 btime 180000 winc 2000 binc 2000\n"
+                "24 <B(1): info depth 18 score cp 25 nodes 300 nps 1500 time 7 pv e7e6\n"
+                "26 <B(1): bestmove e7e6\n"
+            )
+        pair.run_directory = str(run_dir)
+        session.commit()
+    r = app_client.get(f"/chessarena/public-api/v1/live?tournament_id={tid}")
+    assert r.status_code == 200
+    body = r.json()
+    # Game 2 (even) -> engine A black, engine B white — from the tail read.
+    assert body["game_in_pair"] == 2
+    assert body["white"]["label"] == "Stockfish Limited 2000"
+    assert body["black"]["label"] == "ChessEngine Production"
+    assert body["white"]["eval_cp"] == 25
+    assert body["last_move"] == "e7e6"
 
 
 def test_live_auto_detect_excludes_paused(settings, engine_factory,

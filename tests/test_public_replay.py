@@ -140,7 +140,7 @@ def test_game_page_renders_react(app_client, completed_match):
     assert r.status_code == 200
     assert 'id="replay-root"' in r.text
     assert f"data-game-id=\"{gid1}\"" in r.text
-    assert "/static/replay-app/assets/index-" in r.text
+    assert "/static/replay-app/assets/index.js" in r.text
     assert "pgn-viewer" not in r.text
     assert "lichess-pgn-viewer" not in r.text
 
@@ -364,7 +364,7 @@ def test_live_page_renders(app_client, tournament_factory):
     assert r.status_code == 200
     assert 'data-mode="live"' in r.text
     assert 'id="replay-root"' in r.text
-    assert "/static/replay-app/assets/index-" in r.text
+    assert "/static/replay-app/assets/index.js" in r.text
     r2 = app_client.get(f"/chessarena/live?tournament_id={tid}")
     assert r2.status_code == 200
     assert f'data-tournament-id="{tid}"' in r2.text

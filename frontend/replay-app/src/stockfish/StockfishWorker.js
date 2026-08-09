@@ -8,14 +8,20 @@
 
 let worker = null;
 
-export function getStockfishWorker(basePath) {
+export function getStockfishWorker(basePath, workerUrl) {
   if (!worker) {
-    worker = new Worker(
-      `${basePath}/static/replay-app/stockfish/stockfish.wasm.js`
-    );
-    // No setoption calls: this stockfish.js build pins Threads=1 and
-    // Hash=16 (max 16) — an out-of-range setoption can hang the engine.
-    worker.postMessage("uci");
+    try {
+      worker = new Worker(
+        workerUrl || `${basePath}/static/replay-app/stockfish/stockfish.wasm.js`
+      );
+      // No setoption calls: this stockfish.js build pins Threads=1 and
+      // Hash=16 (max 16) — an out-of-range setoption can hang the engine.
+      worker.postMessage("uci");
+    } catch (e) {
+      // Load failure (404, blocked worker URL) — the caller surfaces an
+      // "error" state instead of a silent blank panel.
+      return null;
+    }
   }
   return worker;
 }

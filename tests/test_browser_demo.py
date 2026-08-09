@@ -1377,6 +1377,22 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             page.on("console", _on_console)
             page.on("pageerror", lambda exc: console_errors.append(str(exc)))
 
+            # Count page-side "go ..." commands so the search lifecycle is
+            # observable: one FEN must trigger exactly one search, and no
+            # bestmove-driven restart loop may re-issue "go".
+            page.add_init_script(
+                """
+                window.__goCount = 0;
+                const __origPost = Worker.prototype.postMessage;
+                Worker.prototype.postMessage = function (msg) {
+                  if (typeof msg === 'string' && msg.startsWith('go ')) {
+                    window.__goCount += 1;
+                  }
+                  return __origPost.apply(this, arguments);
+                };
+                """
+            )
+
             resp = page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
             assert resp.status == 200
 
@@ -1393,6 +1409,34 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
                 timeout=30000,
             )
             first_score = page.locator(".analysis-score").inner_text()
+
+            # P1 regression: exactly one search for the first FEN, and the
+            # engine keeps deepening (go infinite) instead of restarting.
+            assert page.evaluate("window.__goCount") == 1, (
+                f"expected 1 go for the first FEN, got {page.evaluate('window.__goCount')}"
+            )
+            page.wait_for_timeout(3000)
+            assert page.evaluate("window.__goCount") == 1, (
+                "no restart loop allowed: go count grew while the position "
+                f"was unchanged -> {page.evaluate('window.__goCount')}"
+            )
+            line_text = page.locator(".analysis-line").inner_text()
+            d1 = __import__("re").search(r"d(\d+)", line_text)
+            assert d1, f"panel must show a depth: {line_text!r}"
+            page.wait_for_timeout(2500)
+            line_text2 = page.locator(".analysis-line").inner_text()
+            d2 = __import__("re").search(r"d(\d+)", line_text2)
+            assert d2 and int(d2.group(1)) >= int(d1.group(1)), (
+                "go infinite must keep deepening: depth went backwards "
+                f"{d1.group(1)} -> {d2 and d2.group(1)}"
+            )
+
+            # Engine provenance: the id name from the worker (Stockfish
+            # <date>) is shown in the panel, separate from the server engine.
+            engine_label = page.locator(".analysis-engine").inner_text()
+            assert __import__("re").match(
+                r"^Stockfish \d{4}-\d{2}-\d{2} · browser", engine_label
+            ), f"expected versioned engine label, got {engine_label!r}"
 
             # Navigating a ply re-analyzes the new position (the score panel
             # is still present and the search indicator shows at some point).
@@ -1411,7 +1455,30 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             # panel must be live (not the server artifact, which is absent).
             assert "Stockfish" in panel.inner_text()
 
+            # P1 regression: one FEN -> exactly one new search.
+            assert page.evaluate("window.__goCount") == 2, (
+                f"expected 2 go commands after one ply navigation, "
+                f"got {page.evaluate('window.__goCount')}"
+            )
+
             assert not console_errors, f"browser console errors: {console_errors}"
+
+            # P2 regression: a worker that fails to load surfaces a visible
+            # "unavailable" state instead of a silent blank panel.
+            bad_page = browser.new_page()
+            bad_errors: list[str] = []
+            bad_page.on("pageerror", lambda exc: bad_errors.append(str(exc)))
+            bad_page.route(
+                "**/stockfish.wasm.js", lambda route: route.abort()
+            )
+            bad_page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
+            err_panel = bad_page.locator(".analysis-panel")
+            err_panel.wait_for(state="visible", timeout=20000)
+            assert "unavailable" in err_panel.inner_text().lower(), (
+                f"expected 'Stockfish unavailable', got {err_panel.inner_text()!r}"
+            )
+            bad_page.close()
+
             browser.close()
     finally:
         proc.terminate()

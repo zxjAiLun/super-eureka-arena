@@ -14,5 +14,14 @@ export default defineConfig({
   build: {
     outDir: staticOut,
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Stable entry name: the FastAPI templates reference
+        // assets/index.js directly, so a rebuild never invalidates them.
+        entryFileNames: "assets/index.js",
+        chunkFileNames: "assets/[name].js",
+        assetFileNames: "assets/index[extname]",
+      },
+    },
   },
 });

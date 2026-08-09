@@ -484,11 +484,25 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           </span>
         </div>
 
+        {browser.status === "error" && (
+          <div className="analysis-panel">
+            <div className="analysis-score">
+              Stockfish unavailable
+              <span className="analysis-engine">Stockfish · browser</span>
+            </div>
+            <div className="analysis-line">engine failed to start</div>
+          </div>
+        )}
+
         {(hasBrowserScore || browser.status === "searching") && (
           <div className="analysis-panel">
             <div className="analysis-score">
               {browserScoreText ?? "…"}
-              <span className="analysis-engine">Stockfish · browser</span>
+              <span className="analysis-engine">
+                {browser.version
+                  ? `Stockfish ${browser.version.split(" ")[1]} · browser`
+                  : "Stockfish · browser"}
+              </span>
             </div>
             <div className="analysis-line">
               {browser.depth != null && <>d{browser.depth} </>}

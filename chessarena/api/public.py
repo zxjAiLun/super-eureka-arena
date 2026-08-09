@@ -247,11 +247,34 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
     pair = _current_pair(t)
     if pair and pair.run_directory and Path(pair.run_directory).is_dir():
         run_dir = Path(pair.run_directory)
-        runtime = derive_runtime_status(run_dir, total_games=2)
         opening_fen = None
         op = run_dir / "opening.epd"
         if op.is_file():
             opening_fen = op.read_text(encoding="utf-8").strip() or None
+
+        from ..services.live_telemetry import parse_live_state
+
+        # P4.11 repair: with a -debug stream the match-facing boundary lines
+        # (Started/Finished game) are inside the bounded tail read, so /live
+        # never scans the whole (potentially 50MB+) stdout.log.
+        telemetry = None
+        stdout = run_dir / "stdout.log"
+        if stdout.is_file():
+            try:
+                telemetry = parse_live_state(stdout)
+            except Exception:
+                telemetry = None
+        if telemetry and telemetry.get("has_debug"):
+            runtime = {
+                "game_in_pair": telemetry.get("game_in_pair"),
+                "total_games": 2,
+                "state": telemetry.get("state"),
+                "last_result": telemetry.get("last_result"),
+            }
+        else:
+            # Pre-P4.11 match: no -debug stream, log is small enough to scan.
+            runtime = derive_runtime_status(run_dir, total_games=2)
+
         payload = {
             **base,
             "status": "live",
@@ -262,17 +285,19 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
             "last_result": runtime.get("last_result"),
             "opening_fen": opening_fen,
         }
-        _attach_live_telemetry(payload, run_dir, opening_fen)
+        _attach_live_telemetry(payload, run_dir, opening_fen, telemetry)
         return payload
     return {**base, "status": "live"}
 
 
-def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
+def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen,
+                           telemetry: Optional[dict] = None) -> None:
     """P4.11: parse the cutechess -debug stream and fill the live fields.
 
     The current position is the real one from the engine protocol stream
     (falls back to the pair's opening FEN when the stream is unavailable);
-    colors follow the pair contract: debug game 0 = engine A white."""
+    colors follow the pair contract: debug game 0 = engine A white.
+    """
     import time as _time
 
     from ..services.live_telemetry import parse_live_state
@@ -280,10 +305,11 @@ def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
     stdout = run_dir / "stdout.log"
     if not stdout.is_file():
         return
-    try:
-        telemetry = parse_live_state(stdout)
-    except Exception:
-        return
+    if telemetry is None:
+        try:
+            telemetry = parse_live_state(stdout)
+        except Exception:
+            return
     payload["current_fen"] = telemetry.get("current_fen") or opening_fen
     payload["side_to_move"] = telemetry.get("side_to_move")
     payload["last_move"] = telemetry.get("last_move")
@@ -314,7 +340,7 @@ def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
             time_ms = eng.get("time_ms")
             # The active engine is the side to move: its clock only runs down
             # for the color that is to move.
-            if state_side == color and time_ms is not None:
+            if payload.get("side_to_move") == color and time_ms is not None:
                 return max(0, base - time_ms)
         return base
 
@@ -333,15 +359,12 @@ def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
 
     # Colors follow the pair contract: game 1 (odd game_in_pair) -> engine A
     # white, game 2 -> engine A black.  Engine index 0 is always engine A.
-    state_side = payload.get("side_to_move")
+    # Without an authoritative game boundary (Started game line) we fail
+    # closed and show no sides rather than guess the colors.
     game_in_pair = payload.get("game_in_pair")
-    if game_in_pair is not None:
-        a_white = game_in_pair % 2 == 1
-    elif state_side is not None:
-        # Fallback: the active engine is the side to move.
-        a_white = not (active == 0)
-    else:
+    if game_in_pair is None:
         return
+    a_white = game_in_pair % 2 == 1
     payload["white"] = _side(0 if a_white else 1, a_label if a_white else b_label, "w")
     payload["black"] = _side(1 if a_white else 0, b_label if a_white else a_label, "b")
 
