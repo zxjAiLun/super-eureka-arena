@@ -19,10 +19,11 @@ from typing import Optional
 
 import chess
 
-# >Name(0): payload  /  <Name(0): payload  (name may contain spaces).
-# cutechess 1.5.1 prefixes every debug line with a message counter
-# ("4 >ChessEngine Production(0): uci"), so the optional leading digits are
-# skipped; match-facing lines (Started/Finished game) carry no prefix.
+# >Name(0): payload  /  <Name(0): payload  (name may contain spaces; the (N)
+# is the engine index, not the game number).  cutechess 1.5.1 prefixes every
+# debug line with a message counter ("4 >ChessEngine Production(0): uci"), so
+# the optional leading digits are skipped; match-facing lines (Started/
+# Finished game) carry no prefix.
 _DEBUG_RE = re.compile(r"^\s*\d*\s*([<>])(.+?)\((\d+)\): (.*)$")
 
 # Hard cap on the tail read: keeps repeated 1.5s polls cheap while always
@@ -41,19 +42,19 @@ def parse_live_state(stdout_path: Path) -> dict:
     """Current live state from a pair run's stdout.log.
 
     Returns:
-      current_fen, side_to_move, last_move, ply, game (0-based debug game),
+      current_fen, side_to_move, last_move, ply,
       engines: {name: {eval_cp, mate, depth, nodes, nps, time_ms, pv}},
-      clocks:  {name: {"own_ms", "opp_ms"}} from the last ``go`` each engine
-               received (own_ms is the engine's remaining clock).
+      go_for:  {name: {"own_ms", "opp_ms", "side"}} — the last ``go`` each
+               engine received.  The receiver is the side to move; its own
+               clock is ``wtime`` when that side is White else ``btime``.
     """
     state: dict = {
         "current_fen": None,
         "side_to_move": None,
         "last_move": None,
         "ply": None,
-        "game": None,
         "engines": {},
-        "clocks": {},
+        "go_for": {},
     }
     if not stdout_path.is_file():
         return state
@@ -64,10 +65,9 @@ def parse_live_state(stdout_path: Path) -> dict:
         m = _DEBUG_RE.match(line)
         if not m:
             continue
-        direction, name, game, payload = (
-            m.group(1), m.group(2), int(m.group(3)), m.group(4),
+        direction, name, payload = (
+            m.group(1), m.group(2), m.group(4),
         )
-        state["game"] = game
         if direction == ">":
             if payload.startswith("position"):
                 tokens = payload.split()
@@ -80,6 +80,20 @@ def parse_live_state(stdout_path: Path) -> dict:
                 position_moves = []
                 if "moves" in tokens:
                     position_moves = tokens[tokens.index("moves") + 1:]
+                # The go command for this position arrives right after; the
+                # receiver is the side to move, so compute it now.
+                try:
+                    board = (
+                        chess.Board(position_fen)
+                        if position_fen else chess.Board()
+                    )
+                    for uci in position_moves:
+                        board.push_uci(uci)
+                    state["side_to_move"] = (
+                        "w" if board.turn == chess.WHITE else "b"
+                    )
+                except (ValueError, IndexError):
+                    pass
             elif payload.startswith("go"):
                 clocks: dict[str, int] = {}
                 tokens = payload.split()
@@ -89,10 +103,18 @@ def parse_live_state(stdout_path: Path) -> dict:
                             clocks[tok] = int(tokens[i + 1])
                         except ValueError:
                             pass
-                if "wtime" in clocks:
-                    state["clocks"][name] = {
-                        "own_ms": clocks["wtime"],
-                        "opp_ms": clocks.get("btime"),
+                if "wtime" in clocks and "btime" in clocks:
+                    side = state.get("side_to_move")
+                    if side == "w":
+                        own, opp = clocks["wtime"], clocks["btime"]
+                    elif side == "b":
+                        own, opp = clocks["btime"], clocks["wtime"]
+                    else:
+                        own = opp = None
+                    state["go_for"][name] = {
+                        "own_ms": own,
+                        "opp_ms": opp,
+                        "side": side,
                     }
         else:
             if payload.startswith("info"):

@@ -296,17 +296,16 @@ def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
     except OSError:
         pass
 
-    game = telemetry.get("game")
-    if game is None:
-        return  # no debug stream yet (e.g. pre-P4.11 matches)
+    engines = telemetry.get("engines") or {}
+    go_for = telemetry.get("go_for") or {}
+    if not go_for:
+        return  # no engine search stream yet (e.g. pre-P4.11 matches)
     a_label = payload["engine_a_label"]
     b_label = payload["engine_b_label"]
-    engines = telemetry.get("engines") or {}
-    clocks = telemetry.get("clocks") or {}
 
     def _side(label: str) -> LiveSideOut:
         eng = engines.get(label) or {}
-        clk = clocks.get(label) or {}
+        clk = go_for.get(label) or {}
         return LiveSideOut(
             label=label,
             clock_ms=clk.get("own_ms"),
@@ -318,7 +317,20 @@ def _attach_live_telemetry(payload: dict, run_dir: Path, opening_fen) -> None:
             pv=eng.get("pv") or [],
         )
 
-    a_white = game % 2 == 0
+    # Colors follow the pair contract: game 1 (odd game_in_pair) -> engine A
+    # white, game 2 -> engine A black.  game_in_pair comes from the runtime
+    # status; fall back to the debug position's side-to-move when unavailable.
+    game_in_pair = payload.get("game_in_pair")
+    if game_in_pair is not None:
+        a_white = game_in_pair % 2 == 1
+    else:
+        a_white = None
+        for name, go in go_for.items():
+            if go.get("side") == "w":
+                a_white = name == a_label
+                break
+    if a_white is None:
+        return
     payload["white"] = _side(a_label if a_white else b_label)
     payload["black"] = _side(b_label if a_white else a_label)
 

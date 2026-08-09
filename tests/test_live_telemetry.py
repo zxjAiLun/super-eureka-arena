@@ -34,7 +34,6 @@ def _write_debug(tmp_path: Path, text: str = DEBUG_LINES) -> Path:
 
 def test_parse_live_state_position_and_engines(tmp_path):
     state = live_telemetry.parse_live_state(_write_debug(tmp_path))
-    assert state["game"] == 0
     assert state["ply"] == 1
     assert state["last_move"] == "e2g3"
     board = __import__("chess", fromlist=["Board"]).Board(state["current_fen"])
@@ -49,10 +48,17 @@ def test_parse_live_state_position_and_engines(tmp_path):
     sf = state["engines"]["Stockfish Limited 2000"]
     assert sf["eval_cp"] == -12
 
-    # Clocks from the last go each engine received.
-    assert state["clocks"]["ChessEngine Production"]["own_ms"] == 180000
-    assert state["clocks"]["Stockfish Limited 2000"]["own_ms"] == 179800
-    assert state["clocks"]["Stockfish Limited 2000"]["opp_ms"] == 178000
+    # The engine receiving "go" is the side to move; its own clock is wtime
+    # when that side is White.  Here White (ChessEngine) is to move first.
+    ce_go = state["go_for"]["ChessEngine Production"]
+    assert ce_go["own_ms"] == 180000
+    assert ce_go["opp_ms"] == 180000
+    assert ce_go["side"] == "w"
+    sf_go = state["go_for"]["Stockfish Limited 2000"]
+    # Black to move: its own clock is btime (178000), opponent's is wtime.
+    assert sf_go["own_ms"] == 178000
+    assert sf_go["opp_ms"] == 179800
+    assert sf_go["side"] == "b"
 
 
 def test_parse_live_state_missing_file(tmp_path):
@@ -101,7 +107,8 @@ def test_live_endpoint_telemetry(settings, engine_factory, tournament_factory,
     assert body["white"]["eval_cp"] == 35
     assert body["white"]["depth"] == 14
     assert body["black"]["eval_cp"] == -12
-    assert body["black"]["clock_ms"] == 179800
+    # Black is to move in the fixture -> its own clock is btime.
+    assert body["black"]["clock_ms"] == 178000
     # Whitelist: no internal fields leak.
     text = str(body)
     for forbidden in ("build_id", "binary_sha256", "stdout.log", "run_root"):

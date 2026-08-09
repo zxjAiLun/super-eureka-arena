@@ -1,0 +1,6 @@
+error: pathspec '4' did not match any file(s) known to git
+error: pathspec 'Production' did not match any file(s) known to git
+error: pathspec '0' did not match any file(s) known to git
+error: pathspec 'uci\), so the parser's ^[<>] anchor never
+matched.  Skip the optional leading digits; match-facing lines (Started/
+Finished game) have no prefix and are unaffected.' did not match any file(s) known to git
