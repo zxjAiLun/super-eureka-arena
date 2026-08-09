@@ -105,3 +105,20 @@ button.linklike {
   cursor: pointer;
   text-decoration: underline;
 }
+
+/* P4.9a match game filters */
+.game-filters { display: flex; gap: 0.4rem; flex-wrap: wrap; align-items: center; margin: 0.6rem 0; }
+.game-filters .gf {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.25rem 0.7rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.game-filters .gf.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.game-filters .gf-counts { font-size: 0.8rem; }

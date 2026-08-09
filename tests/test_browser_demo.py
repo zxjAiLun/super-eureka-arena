@@ -657,12 +657,15 @@ def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
         gid = game.id
         tid = tournament.id
 
-    # Write an analysis artifact covering plies 0..5 (5 moves in SAMPLE_PGN).
-    scores = [20, -10, 55, -30, 120, -5]
+    # Write an analysis artifact covering plies 0..6 (6 moves in SAMPLE_PGN).
+    # Scores crafted so move 1 (e4, White) and move 4 (Qxd5, Black) are clear
+    # winning-share blunders (loss >= 0.35), move 5 (Nc3) a mistake; the
+    # biggest swing is move 4.
+    scores = [50, -350, -300, -180, 250, -20, -100]
     positions = []
     board = chess.Board()
     fens = [board.fen()]
-    for uci in ["e2e4", "d7d5", "e4d5", "d8d5", "b1c3"]:
+    for uci in ["e2e4", "d7d5", "e4d5", "d8d5", "b1c3", "d5d8"]:
         board.push_uci(uci)
         fens.append(board.fen())
     for ply, (fen, cp) in enumerate(zip(fens, scores)):
@@ -724,21 +727,194 @@ def test_browser_replay_analysis_eval_bar(settings, engine_factory, registered):
             assert resp.status == 200
             page.wait_for_timeout(800)
 
+            print("CONSOLE_ERRORS=" + repr(console_errors))
             assert page.locator(".eval-bar").count() == 1, "eval bar missing"
             assert page.locator(".analysis-panel").count() == 1, "analysis panel missing"
             score = page.locator(".analysis-score")
-            assert "+0.20" in score.inner_text(), "ply 0 score wrong"
+            assert "+0.50" in score.inner_text(), "ply 0 score wrong"
 
-            # ArrowRight steps one ply -> score changes to black's perspective.
+            # ArrowRight steps one ply -> score follows the analysis.
             page.keyboard.press("ArrowRight")
             page.wait_for_timeout(200)
-            assert "-0.10" in score.inner_text(), "ply 1 score wrong"
-            page.keyboard.press("ArrowRight")
-            page.wait_for_timeout(200)
-            assert "+0.55" in score.inner_text(), "ply 2 score wrong"
+            assert "-3.50" in score.inner_text(), "ply 1 score wrong"
             page.keyboard.press("ArrowLeft")
             page.wait_for_timeout(200)
-            assert "-0.10" in score.inner_text(), "ply 1 score wrong after back"
+            assert "+0.50" in score.inner_text(), "ply 0 score wrong after back"
+
+            # P4.9b/c: move marks — ply 1 (White e4) ??, ply 4 (Black Qxd5) ??,
+            # ply 5 (White Nc3) ? (mistake).
+            marks = page.locator(".move-mark")
+            assert marks.count() == 3, f"expected 3 move marks, got {marks.count()}"
+            assert marks.nth(0).inner_text() == "??"
+            assert marks.nth(1).inner_text() == "??"
+            assert marks.nth(2).inner_text() == "?"
+
+            # Biggest swing button jumps to ply 4 (Qxd5, the larger drop).
+            biggest_btn = page.locator(".analysis-actions button", has_text="Biggest swing")
+            assert "Qxd5" in biggest_btn.inner_text()
+            biggest_btn.click()
+            page.wait_for_timeout(200)
+            assert page.locator(".ply-indicator").inner_text() == "4/6"
+            assert "+2.50" in score.inner_text()
+
+            # Error navigation: next/previous between plies 1 and 4.
+            page.locator(".analysis-actions button", has_text="\u2039 Error").click()
+            page.wait_for_timeout(200)
+            assert page.locator(".ply-indicator").inner_text() == "1/6"
+            page.locator(".analysis-actions button", has_text="Error \u203a").click()
+            page.wait_for_timeout(200)
+            assert page.locator(".ply-indicator").inner_text() == "4/6"
+
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+def test_browser_match_filters(settings, engine_factory, registered):
+    """P4.9a: the completed-match games table filters by decisive/win/loss/
+    draw/analyzed, with counts, purely client side."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="e2e-filters",
+            status=COMPLETED,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=3,
+            completed_pairs=3,
+            config_snapshot={
+                "engine_a": {"display_name": "ChessEngine Production",
+                             "build_id": manifest["build_id"], "profile": "current-final"},
+                "engine_b": {"display_name": "ChessEngine Legacy Baseline",
+                             "build_id": manifest["build_id"], "profile": "current"},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        from chessarena.models import PairJob
+
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status="COMPLETED",
+        )
+        session.add(pair)
+        session.flush()
+
+        games_spec = [
+            ("ChessEngine Production", "ChessEngine Legacy Baseline", "1-0", True),
+            ("ChessEngine Legacy Baseline", "ChessEngine Production", "1-0", False),
+            ("ChessEngine Production", "ChessEngine Legacy Baseline", "1/2-1/2", False),
+        ]
+        gids = []
+        for i, (white, black, result, analyzed) in enumerate(games_spec):
+            g = Game(
+                id=str(uuid.uuid4()),
+                tournament_id=tournament.id,
+                pair_job_id=pair.id,
+                game_number=i + 1,
+                white_engine=white,
+                black_engine=black,
+                opening_index=0,
+                result=result,
+                pgn_path=str(settings.run_root / f"filter-{i}.pgn"),
+                verified=True,
+            )
+            session.add(g)
+            session.flush()
+            gids.append(g.id)
+            if analyzed:
+                d = settings.run_root / tournament.id / "analysis"
+                d.mkdir(parents=True, exist_ok=True)
+                (d / f"{g.id}.json").write_text("{}", encoding="utf-8")
+        session.commit()
+        tid = tournament.id
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/matches/{tid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+
+            def _on_console(msg):
+                if msg.type == "error":
+                    console_errors.append(msg.text)
+
+            page.on("console", _on_console)
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+
+            resp = page.goto(f"{base}/matches/{tid}", wait_until="networkidle")
+            assert resp.status == 200
+            page.wait_for_timeout(400)
+
+            rows = page.locator("#game-filters + table tbody tr")
+            assert rows.count() == 3
+
+            def visible_count():
+                return rows.evaluate_all(
+                    "els => els.filter(e => e.style.display !== 'none').length"
+                )
+
+            def click_filter(label):
+                page.locator("#game-filters .gf", has_text=label).click()
+                page.wait_for_timeout(200)
+
+            assert visible_count() == 3  # All
+            click_filter("Decisive")
+            assert visible_count() == 2
+            click_filter("Wins")
+            assert visible_count() == 1
+            click_filter("Losses")
+            assert visible_count() == 1
+            click_filter("Draws")
+            assert visible_count() == 1
+            click_filter("Analyzed")
+            assert visible_count() == 1
+            click_filter("All")
+            assert visible_count() == 3
 
             assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()

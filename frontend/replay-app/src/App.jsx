@@ -19,6 +19,32 @@ const TC_LABELS = {
   rapid_5_3: "5+3",
 };
 
+// P4.9: Arena swing classification (winning-share drop of the mover).
+const INACCURACY = 0.1;
+const MISTAKE = 0.2;
+const BLUNDER = 0.35;
+
+function formatScoreOf(p) {
+  if (!p) return null;
+  if (p.mate != null) return p.mate > 0 ? `M${p.mate}` : `-M${Math.abs(p.mate)}`;
+  if (p.score_cp == null) return null;
+  const v = p.score_cp / 100;
+  return (v > 0 ? "+" : "") + v.toFixed(2);
+}
+
+function whiteShareOf(p) {
+  if (p.mate != null) return p.mate > 0 ? 0.98 : 0.02;
+  if (p.score_cp == null) return 0.5;
+  return Math.min(0.98, Math.max(0.02, 1 / (1 + Math.exp(-p.score_cp / 250))));
+}
+
+function moveMark(loss) {
+  if (loss >= BLUNDER) return "??";
+  if (loss >= MISTAKE) return "?";
+  if (loss >= INACCURACY) return "?!";
+  return "";
+}
+
 function useReplay({ gameId, tournamentId, basePath }) {
   const [status, setStatus] = useState("loading");
   const [error, setError] = useState(null);
@@ -192,6 +218,49 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     return undefined;
   }, [ply, status]);
 
+  // P4.9b/c: per-move winning-share swing from the mover's perspective.
+  const swings = useMemo(() => {
+    if (!analysis?.positions?.length) return [];
+    const positions = analysis.positions;
+    const out = [];
+    for (let i = 1; i < positions.length; i++) {
+      const before = whiteShareOf(positions[i - 1]);
+      const after = whiteShareOf(positions[i]);
+      // Odd ply = White's move, even ply = Black's move.
+      const loss = i % 2 === 1 ? before - after : after - before;
+      out.push({ ply: i, loss });
+    }
+    return out;
+  }, [analysis]);
+
+  const errorPlies = useMemo(
+    () => swings.filter((s) => s.loss >= INACCURACY).map((s) => s.ply),
+    [swings]
+  );
+  const biggest = useMemo(
+    () =>
+      swings.reduce(
+        (best, s) => (s.loss > best.loss ? s : best),
+        { ply: 0, loss: 0 }
+      ),
+    [swings]
+  );
+  const biggestText = biggest.ply
+    ? `${moves[biggest.ply - 1]?.san ?? ""} ${formatScoreOf(
+        analysis?.positions?.[biggest.ply - 1]
+      )} → ${formatScoreOf(analysis?.positions?.[biggest.ply])}`
+    : "";
+
+  const jumpToBiggest = () => setPly(biggest.ply);
+  const nextError = () => {
+    const next = errorPlies.find((p) => p > ply);
+    setPly(next ?? errorPlies[0] ?? ply);
+  };
+  const prevError = () => {
+    const prev = [...errorPlies].reverse().find((p) => p < ply);
+    setPly(prev ?? errorPlies[errorPlies.length - 1] ?? ply);
+  };
+
   if (status === "loading") {
     return <div className="demo-message">Loading game…</div>;
   }
@@ -212,18 +281,6 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   // Analysis is aligned by ply: positions[ply] covers the current position.
   const pos = analysis?.positions?.[ply] ?? null;
 
-  const formatScore = (p) => {
-    if (!p) return null;
-    if (p.mate != null) return p.mate > 0 ? `M${p.mate}` : `-M${Math.abs(p.mate)}`;
-    if (p.score_cp == null) return null;
-    const v = p.score_cp / 100;
-    return (v > 0 ? "+" : "") + v.toFixed(2);
-  };
-  const whiteShare = (p) => {
-    if (p.mate != null) return p.mate > 0 ? 0.98 : 0.02;
-    if (p.score_cp == null) return 0.5;
-    return Math.min(0.98, Math.max(0.02, 1 / (1 + Math.exp(-p.score_cp / 250))));
-  };
   const pvSans = (p) => {
     if (!p?.pv?.length) return [];
     const c = new Chess(p.fen);
@@ -238,7 +295,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     }
     return out;
   };
-  const scoreText = formatScore(pos);
+  const scoreText = formatScoreOf(pos);
   const pvText = pos ? pvSans(pos) : [];
 
   return (
@@ -256,7 +313,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
             <div className="eval-bar" aria-label="Evaluation">
               <div
                 className="eval-bar-white"
-                style={{ height: `${whiteShare(pos) * 100}%` }}
+                style={{ height: `${whiteShareOf(pos) * 100}%` }}
               />
             </div>
           )}
@@ -336,6 +393,30 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
             {pvText.length > 0 && (
               <div className="analysis-pv">PV: {pvText.join(" ")}</div>
             )}
+            <div className="analysis-actions">
+              <button
+                type="button"
+                onClick={jumpToBiggest}
+                disabled={!biggest.ply}
+                title="Jump to the biggest winning-share swing"
+              >
+                Biggest swing{biggest.ply ? `: ${biggestText}` : ""}
+              </button>
+              <button
+                type="button"
+                onClick={prevError}
+                disabled={errorPlies.length === 0}
+              >
+                ‹ Error
+              </button>
+              <button
+                type="button"
+                onClick={nextError}
+                disabled={errorPlies.length === 0}
+              >
+                Error ›
+              </button>
+            </div>
           </div>
         )}
 
@@ -347,16 +428,32 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
                 type="button"
                 className={"move" + (ply === r.n * 2 - 1 ? " active" : "")}
                 onClick={() => setPly(r.n * 2 - 1)}
+                title={moveMark(swings[r.n * 2 - 2]?.loss)
+                  ? "Arena classification · evaluation swing"
+                  : ""}
               >
                 {r.white.san}
+                {moveMark(swings[r.n * 2 - 2]?.loss) && (
+                  <span className="move-mark">
+                    {moveMark(swings[r.n * 2 - 2].loss)}
+                  </span>
+                )}
               </button>
               {r.black && (
                 <button
                   type="button"
                   className={"move" + (ply === r.n * 2 ? " active" : "")}
                   onClick={() => setPly(r.n * 2)}
+                  title={moveMark(swings[r.n * 2 - 1]?.loss)
+                    ? "Arena classification · evaluation swing"
+                    : ""}
                 >
                   {r.black.san}
+                  {moveMark(swings[r.n * 2 - 1]?.loss) && (
+                    <span className="move-mark">
+                      {moveMark(swings[r.n * 2 - 1].loss)}
+                    </span>
+                  )}
                 </button>
               )}
             </div>

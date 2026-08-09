@@ -18,6 +18,15 @@
 
 <h2>Games</h2>
 {% if match.games %}
+<div class="game-filters" id="game-filters">
+  <button type="button" class="gf active" data-filter="all">All</button>
+  <button type="button" class="gf" data-filter="decisive">Decisive</button>
+  <button type="button" class="gf" data-filter="wins">Wins</button>
+  <button type="button" class="gf" data-filter="losses">Losses</button>
+  <button type="button" class="gf" data-filter="draws">Draws</button>
+  <button type="button" class="gf" data-filter="analyzed">Analyzed</button>
+  <span class="muted gf-counts">Wins/Losses/Draws are from Engine A (candidate) perspective.</span>
+</div>
 <table class="match-table">
   <thead>
     <tr>
@@ -26,22 +35,75 @@
       <th>Black</th>
       <th>Result</th>
       <th>Termination</th>
+      <th>Analysis</th>
       <th></th>
     </tr>
   </thead>
   <tbody>
     {% for g in match.games %}
-    <tr>
-      <td>{{ g.game_number }}</td>
-      <td>{{ g.white_engine }}</td>
-      <td>{{ g.black_engine }}</td>
-      <td>{{ g.result or "" }}</td>
-      <td>{{ g.termination or "" }}</td>
-      <td><a href="{{ settings.base_path }}/games/{{ g.id }}">Replay</a></td>
-    </tr>
+      {% set win = (g.white_engine == match.engine_a_label and g.result == "1-0") or (g.black_engine == match.engine_a_label and g.result == "0-1") %}
+      {% set loss = (g.white_engine == match.engine_a_label and g.result == "0-1") or (g.black_engine == match.engine_a_label and g.result == "1-0") %}
+      <tr
+        data-result="{{ g.result or '' }}"
+        data-candidate-win="{{ '1' if win else '0' }}"
+        data-candidate-loss="{{ '1' if loss else '0' }}"
+        data-analyzed="{{ '1' if g.analyzed else '0' }}"
+      >
+        <td>{{ g.game_number }}</td>
+        <td>{{ g.white_engine }}</td>
+        <td>{{ g.black_engine }}</td>
+        <td>{{ g.result or "" }}</td>
+        <td>{{ g.termination or "" }}</td>
+        <td>{{ "analyzed" if g.analyzed else "" }}</td>
+        <td><a href="{{ settings.base_path }}/games/{{ g.id }}">Replay</a></td>
+      </tr>
     {% endfor %}
   </tbody>
 </table>
+<script>
+(function () {
+  var rows = Array.prototype.slice.call(document.querySelectorAll('#game-filters + table tbody tr'));
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('#game-filters .gf'));
+  function counts() {
+    var c = { all: rows.length, decisive: 0, wins: 0, losses: 0, draws: 0, analyzed: 0 };
+    rows.forEach(function (r) {
+      var res = r.getAttribute('data-result');
+      if (res === '1-0' || res === '0-1') c.decisive += 1;
+      if (res === '1/2-1/2') c.draws += 1;
+      if (r.getAttribute('data-candidate-win') === '1') c.wins += 1;
+      if (r.getAttribute('data-candidate-loss') === '1') c.losses += 1;
+      if (r.getAttribute('data-analyzed') === '1') c.analyzed += 1;
+    });
+    var labels = { all: 'All', decisive: 'Decisive', wins: 'Wins', losses: 'Losses', draws: 'Draws', analyzed: 'Analyzed' };
+    buttons.forEach(function (b) {
+      b.textContent = labels[b.getAttribute('data-filter')] + ' ' + c[b.getAttribute('data-filter')];
+    });
+  }
+  function apply() {
+    var f = (document.querySelector('#game-filters .gf.active') || {}).getAttribute ? document.querySelector('#game-filters .gf.active').getAttribute('data-filter') : 'all';
+    rows.forEach(function (r) {
+      var show = f === 'all';
+      if (!show) {
+        var res = r.getAttribute('data-result');
+        if (f === 'decisive') show = res === '1-0' || res === '0-1';
+        else if (f === 'draws') show = res === '1/2-1/2';
+        else if (f === 'wins') show = r.getAttribute('data-candidate-win') === '1';
+        else if (f === 'losses') show = r.getAttribute('data-candidate-loss') === '1';
+        else if (f === 'analyzed') show = r.getAttribute('data-analyzed') === '1';
+      }
+      r.style.display = show ? '' : 'none';
+    });
+  }
+  buttons.forEach(function (b) {
+    b.addEventListener('click', function () {
+      buttons.forEach(function (x) { x.classList.remove('active'); });
+      b.classList.add('active');
+      apply();
+    });
+  });
+  counts();
+})();
+</script>
 {% else %}
 <p class="muted">No verified games in this match.</p>
 {% endif %}
