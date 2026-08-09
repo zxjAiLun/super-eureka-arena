@@ -29,7 +29,7 @@ TIME_CONTROLS: Dict[str, Dict[str, str]] = {
         "cutechess_tc": "180+2",
     },
     "blitz_10_01": {
-        "label": "Blitz 10+0.1",
+        "label": "10s+0.1s",
         "cutechess_tc": "10+0.1",
     },
     "rapid_5_3": {

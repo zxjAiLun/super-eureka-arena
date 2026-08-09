@@ -16,6 +16,7 @@ function pgnStartFen(pgn) {
 const TC_LABELS = {
   bullet_1_0: "1+0",
   blitz_3_2: "3+2",
+  blitz_10_01: "10s+0.1s",
   rapid_5_3: "5+3",
 };
 
