@@ -1076,3 +1076,183 @@ def test_browser_custom_elo_hidden_input_cleared(settings, engine_factory, regis
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+BTM_PGN = "\n".join(
+    [
+        '[Event "E2E"]',
+        '[Site "?"]',
+        '[Date "2026.08.09"]',
+        '[Round "1"]',
+        '[White "EngineA"]',
+        '[Black "EngineB"]',
+        '[Result "1-0"]',
+        '[FEN "r1bqkb1r/1ppp1ppp/p1n2n2/4p3/B3P3/5N2/PPPP1PPP/RNBQ1RK1 b kq - 3 5"]',
+        "",
+        "5...d6 6. d3 Bg4 1-0",
+        "",
+    ]
+)
+BTM_START_FEN = "r1bqkb1r/1ppp1ppp/p1n2n2/4p3/B3P3/5N2/PPPP1PPP/RNBQ1RK1 b kq - 3 5"
+
+
+def test_browser_replay_black_to_move_fen(settings, engine_factory, registered):
+    """P4.9 final repair: with a Black-to-move start FEN the first move is
+    scored as Black's move (mark on a Black blunder), and move labels/rows use
+    the real fullmove number from the FEN (5...d6, 6.d3)."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="e2e-btm",
+            status=COMPLETED,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=1,
+            completed_pairs=1,
+            config_snapshot={
+                "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        from chessarena.models import PairJob
+
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status="COMPLETED",
+        )
+        session.add(pair)
+        session.flush()
+        pgn_path = settings.run_root / "btm-match.pgn"
+        pgn_path.parent.mkdir(parents=True, exist_ok=True)
+        pgn_path.write_text(BTM_PGN, encoding="utf-8")
+        game = Game(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_job_id=pair.id,
+            game_number=1,
+            white_engine="EngineA",
+            black_engine="EngineB",
+            opening_index=0,
+            result="1-0",
+            pgn_path=str(pgn_path),
+            verified=True,
+        )
+        session.add(game)
+        session.commit()
+        gid = game.id
+        tid = tournament.id
+
+    # Analysis: move 1 is BLACK's 5...d6 and is a clear black blunder (share
+    # jumps 0.53 -> 0.73); moves 2/3 are quiet.
+    scores = [30, 250, 240, 245]
+    positions = []
+    board = chess.Board(BTM_START_FEN)
+    fens = [board.fen()]
+    for uci in ["d7d6", "d2d3", "c8g4"]:
+        board.push_uci(uci)
+        fens.append(board.fen())
+    for ply, (fen, cp) in enumerate(zip(fens, scores)):
+        positions.append(
+            {"ply": ply, "fen": fen, "score_cp": cp, "mate": None,
+             "best_move": "d7d6", "pv": ["d7d6"]}
+        )
+    analysis_dir = settings.run_root / tid / "analysis"
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_dir / f"{gid}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "game_id": gid,
+                "engine": {"name": "Stockfish", "build_id": "x", "binary_sha256": "y"},
+                "limit": {"type": "nodes", "value": 100000},
+                "positions": positions,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/games/{gid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+
+            def _on_console(msg):
+                if msg.type == "error":
+                    console_errors.append(msg.text)
+
+            page.on("console", _on_console)
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+
+            resp = page.goto(f"{base}/games/{gid}", wait_until="networkidle")
+            assert resp.status == 200
+            page.wait_for_timeout(800)
+
+            # The first move is Black's and must carry the ? mark (the old
+            # ply-parity logic would have scored it as White and dropped it).
+            marks = page.locator(".move-mark")
+            assert marks.count() == 1, f"expected 1 mark, got {marks.count()}"
+            assert marks.nth(0).inner_text() == "?"
+
+            # Move list rows use the real fullmove numbers from the FEN.
+            move_ns = page.locator(".move-n").all_inner_texts()
+            assert move_ns == ["5.", "6."], f"move numbers wrong: {move_ns}"
+
+            # Biggest swing is the black blunder and shows the full label.
+            biggest_btn = page.locator(
+                ".analysis-actions button", has_text="Biggest swing"
+            )
+            assert "5...d6" in biggest_btn.inner_text()
+            biggest_btn.click()
+            page.wait_for_timeout(200)
+            assert page.locator(".ply-indicator").inner_text() == "1/3"
+
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()

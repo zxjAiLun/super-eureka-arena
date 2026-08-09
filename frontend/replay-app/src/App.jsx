@@ -235,9 +235,38 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     return undefined;
   }, [ply, status]);
 
+  // FEN-aware move numbering: the start position may be mid-game (Black to
+  // move, fullmove > 1), so move numbers come from the FEN header, not from
+  // counting rows from 1.White.
+  const startFields = startFen.split(" ");
+  const startSide = startFields[1] || "w";
+  const startFullmove = parseInt(startFields[5] || "1", 10) || 1;
+  // Moves already played before the FEN start, per color.
+  const w0 = startSide === "w" ? startFullmove - 1 : startFullmove;
+  const b0 = startFullmove - 1;
+  const moveNumber = (i) => {
+    // i: 1-based ply; returns the fullmove number of that move.
+    const m = moves[i - 1];
+    if (!m) return 0;
+    let same = 0;
+    for (let k = 0; k < i - 1; k++) {
+      if (moves[k].color === m.color) same += 1;
+    }
+    const base = m.color === "w" ? w0 : b0;
+    return base + same + 1;
+  };
+  const moveLabel = (i) => {
+    const m = moves[i - 1];
+    if (!m) return "";
+    const n = moveNumber(i);
+    return m.color === "w" ? `${n}.${m.san}` : `${n}...${m.san}`;
+  };
+
   // P4.9b/c: per-move winning-share swing from the mover's perspective.
-  // Moves with an unknown evaluation on either side are marked `known: false`
-  // and never participate in classification or the biggest-swing search.
+  // The mover comes from the actual move (moves[i-1].color), never from ply
+  // parity, so FEN starts with Black to move work.  Moves with an unknown
+  // evaluation on either side are marked `known: false` and never participate
+  // in classification or the biggest-swing search.
   const swings = useMemo(() => {
     if (!analysis?.positions?.length) return [];
     const positions = analysis.positions;
@@ -245,16 +274,17 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
     for (let i = 1; i < positions.length; i++) {
       const before = shareOf(positions[i - 1]);
       const after = shareOf(positions[i]);
-      if (before == null || after == null) {
+      const mover = moves[i - 1];
+      if (before == null || after == null || !mover) {
         out.push({ ply: i, loss: 0, known: false });
         continue;
       }
-      // Odd ply = White's move, even ply = Black's move.
-      const loss = i % 2 === 1 ? before - after : after - before;
+      const loss =
+        mover.color === "w" ? before - after : after - before;
       out.push({ ply: i, loss, known: true });
     }
     return out;
-  }, [analysis]);
+  }, [analysis, moves]);
 
   const errorPlies = useMemo(
     () =>
@@ -273,17 +303,11 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
         ),
     [swings]
   );
-  const moveLabel = (ply) => {
-    const n = Math.ceil(ply / 2);
-    const san = moves[ply - 1]?.san ?? "";
-    return ply % 2 === 1 ? `${n}.${san}` : `${n}...${san}`;
-  };
   const biggestText = biggest.ply
     ? `${moveLabel(biggest.ply)} ${formatScoreOf(
         analysis?.positions?.[biggest.ply - 1]
       )} → ${formatScoreOf(analysis?.positions?.[biggest.ply])}`
     : "";
-
   const jumpToBiggest = () => setPly(biggest.ply);
   const nextError = () => {
     const next = errorPlies.find((p) => p > ply);
@@ -312,9 +336,21 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   }
 
   const { game, timeControl, matchName } = meta;
+  // Rows are grouped by real fullmove number (FEN-aware); each row holds the
+  // white and/or black move of that fullmove with their 1-based plies.
   const rows = [];
-  for (let i = 0; i < moves.length; i += 2) {
-    rows.push({ n: i / 2 + 1, white: moves[i], black: moves[i + 1] });
+  const rowByN = new Map();
+  for (let i = 1; i <= moves.length; i++) {
+    const m = moves[i - 1];
+    const n = moveNumber(i);
+    let row = rowByN.get(n);
+    if (!row) {
+      row = { n, white: null, black: null };
+      rowByN.set(n, row);
+      rows.push(row);
+    }
+    if (m.color === "w") row.white = { move: m, ply: i };
+    else row.black = { move: m, ply: i };
   }
 
   // Analysis is aligned by ply: positions[ply] covers the current position.
@@ -465,29 +501,39 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
               <span className="move-n">{r.n}.</span>
               <button
                 type="button"
-                className={"move" + (ply === r.n * 2 - 1 ? " active" : "")}
-                onClick={() => setPly(r.n * 2 - 1)}
-                title={markFor(r.n * 2 - 2)
+                className={
+                  "move" + (r.white && ply === r.white.ply ? " active" : "")
+                }
+                onClick={() => r.white && setPly(r.white.ply)}
+                title={r.white && markFor(r.white.ply - 1)
                   ? "Arena classification · evaluation swing"
                   : ""}
               >
-                {r.white.san}
-                {markFor(r.n * 2 - 2) && (
-                  <span className="move-mark">{markFor(r.n * 2 - 2)}</span>
+                {r.white
+                  ? r.white.move.san
+                  : r.black
+                    ? "…"
+                    : ""}
+                {r.white && markFor(r.white.ply - 1) && (
+                  <span className="move-mark">
+                    {markFor(r.white.ply - 1)}
+                  </span>
                 )}
               </button>
               {r.black && (
                 <button
                   type="button"
-                  className={"move" + (ply === r.n * 2 ? " active" : "")}
-                  onClick={() => setPly(r.n * 2)}
-                  title={markFor(r.n * 2 - 1)
+                  className={"move" + (ply === r.black.ply ? " active" : "")}
+                  onClick={() => setPly(r.black.ply)}
+                  title={markFor(r.black.ply - 1)
                     ? "Arena classification · evaluation swing"
                     : ""}
                 >
-                  {r.black.san}
-                  {markFor(r.n * 2 - 1) && (
-                    <span className="move-mark">{markFor(r.n * 2 - 1)}</span>
+                  {r.black.move.san}
+                  {markFor(r.black.ply - 1) && (
+                    <span className="move-mark">
+                      {markFor(r.black.ply - 1)}
+                    </span>
                   )}
                 </button>
               )}
