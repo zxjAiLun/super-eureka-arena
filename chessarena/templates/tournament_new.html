@@ -20,6 +20,11 @@
       {% endfor %}
     </select>
   </label>
+  <label id="elo-a-wrap" class="custom-elo" style="display:none">Custom Elo (optional) <span class="muted">— per-match override, no preset is created</span>
+    <input type="number" name="engine_a_elo" min="1" value="{{ defaults.engine_a_elo }}"
+      placeholder="Allowed range shown below">
+    <span class="muted" id="elo-a-range"></span>
+  </label>
 
   <h3>Engine B</h3>
   <label>Preset
@@ -31,6 +36,11 @@
         </option>
       {% endfor %}
     </select>
+  </label>
+  <label id="elo-b-wrap" class="custom-elo" style="display:none">Custom Elo (optional) <span class="muted">— per-match override, no preset is created</span>
+    <input type="number" name="engine_b_elo" min="1" value="{{ defaults.engine_b_elo }}"
+      placeholder="Allowed range shown below">
+    <span class="muted" id="elo-b-range"></span>
   </label>
 
   <p id="same-preset-warning" class="danger" style="display:none">
@@ -75,14 +85,40 @@
 
 <script>
 (function () {
+  var PRESET_ELO = {{ preset_elo | tojson }};
   var a = document.querySelector('select[name="engine_a_preset"]');
   var b = document.querySelector('select[name="engine_b_preset"]');
   var warn = document.getElementById('same-preset-warning');
   var wrap = document.getElementById('allow-selfplay-wrap');
+
+  function eloEls(side) {
+    return {
+      wrap: document.getElementById('elo-' + side + '-wrap'),
+      input: document.querySelector('input[name="engine_' + side + '_elo"]'),
+      range: document.getElementById('elo-' + side + '-range'),
+    };
+  }
+  function refreshElo(side, presetId) {
+    var limit = PRESET_ELO[presetId];
+    var els = eloEls(side);
+    if (!limit) {
+      els.wrap.style.display = 'none';
+      els.input.removeAttribute('min');
+      els.input.removeAttribute('max');
+      els.range.textContent = '';
+      return;
+    }
+    els.wrap.style.display = 'block';
+    if (limit.min != null) { els.input.setAttribute('min', limit.min); }
+    if (limit.max != null) { els.input.setAttribute('max', limit.max); }
+    els.range.textContent = 'Allowed: ' + limit.min + '\u2013' + limit.max;
+  }
   function refresh() {
     var same = a.value === b.value;
     warn.style.display = same ? 'block' : 'none';
     wrap.style.display = same ? 'block' : 'none';
+    refreshElo('a', a.value);
+    refreshElo('b', b.value);
   }
   a.addEventListener('change', refresh);
   b.addEventListener('change', refresh);

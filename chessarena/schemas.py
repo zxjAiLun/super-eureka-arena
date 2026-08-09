@@ -45,6 +45,11 @@ class OpeningSetOut(BaseModel):
 # ---------------------------------------------------------------------------
 class EngineRef(BaseModel):
     preset_id: str = Field(min_length=1)
+    # P4.6: per-match UCI_Elo override for the selected preset's engine build.
+    # None keeps the preset exactly as registered; a value is validated against
+    # the build's probed capability schema (UCI_Elo spin min/max +
+    # UCI_LimitStrength check) at creation and frozen into the snapshot.
+    custom_elo: Optional[int] = Field(default=None, ge=1)
 
 
 class TournamentCreate(BaseModel):

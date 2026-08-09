@@ -28,6 +28,7 @@ from ..models import (
     Tournament,
 )
 from ..schemas import LiveOut, PublicGameOut, PublicMatchDetailOut, PublicMatchOut
+from ..services.labels import tournament_engine_label
 from ..services.replay import ReplayError, read_single_game_pgn
 from ..services.runtime_status import derive_runtime_status
 
@@ -38,26 +39,12 @@ pages_router = APIRouter(include_in_schema=False, tags=["public-pages"])
 def _engine_label(
     session: Session, preset_id: str | None, build_id: str, profile: str
 ) -> str:
-    """Display label for one side.  Prefers the preset's friendly display name;
-    falls back to the engine name + profile.  build_id is never exposed."""
-    if preset_id:
-        preset = (
-            session.query(EnginePreset)
-            .filter(EnginePreset.preset_id == preset_id)
-            .first()
-        )
-        if preset is not None:
-            return preset.display_name
-    name = "ChessEngine"
-    if build_id:
-        build = (
-            session.query(EngineBuild)
-            .filter(EngineBuild.build_id == build_id)
-            .first()
-        )
-        if build is not None:
-            name = build.engine_name
-    return f"{name} ({profile})" if profile else name
+    """Display label for one side (build_id is never exposed).  The frozen
+    tournament snapshot's display_name wins; legacy snapshots fall back to
+    the preset/build lookup."""
+    return tournament_engine_label(
+        session, None, preset_id, build_id, profile
+    )
 
 
 def _score_percent(t: Tournament) -> float | None:
@@ -68,6 +55,7 @@ def _score_percent(t: Tournament) -> float | None:
 
 
 def _public_match(session: Session, t: Tournament) -> PublicMatchOut:
+    snap = t.config_snapshot or {}
     return PublicMatchOut(
         id=t.id,
         name=t.name,
@@ -80,11 +68,13 @@ def _public_match(session: Session, t: Tournament) -> PublicMatchOut:
         draws=t.draws,
         score_percent=_score_percent(t),
         finished_at=t.finished_at,
-        engine_a_label=_engine_label(
-            session, t.engine_a_preset_id, t.engine_a_build_id, t.engine_a_profile
+        engine_a_label=tournament_engine_label(
+            session, snap.get("engine_a"),
+            t.engine_a_preset_id, t.engine_a_build_id, t.engine_a_profile,
         ),
-        engine_b_label=_engine_label(
-            session, t.engine_b_preset_id, t.engine_b_build_id, t.engine_b_profile
+        engine_b_label=tournament_engine_label(
+            session, snap.get("engine_b"),
+            t.engine_b_preset_id, t.engine_b_build_id, t.engine_b_profile,
         ),
         opening_set_id=t.opening_set_id,
     )
@@ -183,11 +173,13 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
     base = {
         "tournament_id": t.id,
         "name": t.name,
-        "engine_a_label": _engine_label(
-            session, t.engine_a_preset_id, t.engine_a_build_id, t.engine_a_profile
+        "engine_a_label": tournament_engine_label(
+            session, (t.config_snapshot or {}).get("engine_a"),
+            t.engine_a_preset_id, t.engine_a_build_id, t.engine_a_profile,
         ),
-        "engine_b_label": _engine_label(
-            session, t.engine_b_preset_id, t.engine_b_build_id, t.engine_b_profile
+        "engine_b_label": tournament_engine_label(
+            session, (t.config_snapshot or {}).get("engine_b"),
+            t.engine_b_preset_id, t.engine_b_build_id, t.engine_b_profile,
         ),
         "time_control": t.time_control,
         "opening_set_id": t.opening_set_id,

@@ -284,7 +284,60 @@ def create_tournament(
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-    def _snapshot_engine(preset, build) -> dict:
+    # P4.6: a per-match UCI_Elo override is validated against the selected
+    # build's real probed capability schema — never a hardcoded range.
+    for label, build, custom_elo in (
+        ("engine_a", build_a, body.engine_a.custom_elo),
+        ("engine_b", build_b, body.engine_b.custom_elo),
+    ):
+        if custom_elo is None:
+            continue
+        schema = build.uci_options_schema or {}
+        elo = schema.get("UCI_Elo")
+        strength = schema.get("UCI_LimitStrength")
+        if elo is None or elo.get("type") != "spin":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{label}: custom Elo requires a UCI_Elo spin option, "
+                    "which this build does not declare"
+                ),
+            )
+        if strength is None or strength.get("type") != "check":
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{label}: custom Elo requires a UCI_LimitStrength check "
+                    "option, which this build does not declare"
+                ),
+            )
+        if elo.get("min") is not None and custom_elo < int(elo["min"]):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{label}: custom Elo {custom_elo} below the engine's "
+                    f"declared minimum {elo['min']}"
+                ),
+            )
+        if elo.get("max") is not None and custom_elo > int(elo["max"]):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{label}: custom Elo {custom_elo} above the engine's "
+                    f"declared maximum {elo['max']}"
+                ),
+            )
+
+    def _custom_display_name(preset, custom_elo: int | None) -> str:
+        if custom_elo is None:
+            return preset.display_name
+        name = (preset.display_name or "").strip()
+        parts = name.rsplit(" ", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            name = parts[0]
+        return f"{name} {custom_elo}"
+
+    def _snapshot_engine(preset, build, custom_elo=None) -> dict:
         args = list(preset.command_args or [])
         if len(args) >= 2:
             # Project engines carry "--profile <profile>".
@@ -293,24 +346,35 @@ def create_tournament(
             # External engines (e.g. Stockfish) have no internal profile; the
             # historical audit column records the preset id instead.
             profile = f"preset:{preset.preset_id}"
+        uci_options = dict(preset.uci_options or {})
+        if custom_elo is not None:
+            # P4.6: per-match strength override frozen into the snapshot; the
+            # worker consumes exactly this, and no EnginePreset is created.
+            uci_options["UCI_LimitStrength"] = True
+            uci_options["UCI_Elo"] = custom_elo
         return {
             "preset_id": preset.preset_id,
-            "display_name": preset.display_name,
+            "display_name": _custom_display_name(preset, custom_elo),
             "build_id": build.build_id,
             "profile": profile,
             "command_args": args,
-            "uci_options": dict(preset.uci_options or {}),
+            "uci_options": uci_options,
             # Freeze the engine's capability schema into the tournament
             # snapshot so command construction and verifier rebuild are
             # immune to later live backfill/re-probe of the EngineBuild row.
             "uci_options_schema": build.uci_options_schema or {},
             "git_sha": build.git_sha,
             "binary_sha256": build.binary_sha256,
+            **({"custom_elo": custom_elo} if custom_elo is not None else {}),
         }
 
     config_snapshot = {
-        "engine_a": _snapshot_engine(preset_a, build_a),
-        "engine_b": _snapshot_engine(preset_b, build_b),
+        "engine_a": _snapshot_engine(
+            preset_a, build_a, body.engine_a.custom_elo
+        ),
+        "engine_b": _snapshot_engine(
+            preset_b, build_b, body.engine_b.custom_elo
+        ),
         "opening_set": {
             "opening_set_id": opening.opening_set_id,
             "sha256": opening.sha256,
@@ -738,7 +802,18 @@ def _new_match_defaults(session, settings, query: dict) -> dict:
         or prefs.get("time_control")
         or "blitz_3_2",
         "pairs": query.get("pairs") or prefs.get("pairs") or "10",
+        "engine_a_elo": query.get("engine_a_elo") or "",
+        "engine_b_elo": query.get("engine_b_elo") or "",
     }
+
+
+def _preset_elo_limits(schema: dict) -> dict | None:
+    """(min, max) of a build's UCI_Elo spin option, or None when the build
+    does not support strength limiting (custom Elo hidden)."""
+    elo = (schema or {}).get("UCI_Elo")
+    if elo is None or elo.get("type") != "spin":
+        return None
+    return {"min": elo.get("min"), "max": elo.get("max")}
 
 
 @admin_router.get("/admin/tournaments/new", response_class=HTMLResponse)
@@ -756,7 +831,15 @@ def admin_tournament_new(request: Request, session: Session = Depends(get_db)):
         .order_by(OpeningSet.created_at.desc())
         .all()
     )
+    builds = {
+        b.build_id: b.uci_options_schema or {}
+        for b in session.query(EngineBuild).all()
+    }
     defaults = _new_match_defaults(session, request.app.state.settings, dict(request.query_params))
+    preset_elo = {
+        p.preset_id: _preset_elo_limits(builds.get(p.build_id))
+        for p in presets
+    }
     return templates.TemplateResponse(
         request,
         "tournament_new.html",
@@ -765,6 +848,7 @@ def admin_tournament_new(request: Request, session: Session = Depends(get_db)):
             "openings": openings,
             "time_controls": TIME_CONTROLS,
             "defaults": defaults,
+            "preset_elo": preset_elo,
             "settings": request.app.state.settings,
         },
     )
@@ -776,8 +860,22 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
     validate_csrf_token(request, form)
     body = TournamentCreate(
         name=form["name"],
-        engine_a={"preset_id": form["engine_a_preset"]},
-        engine_b={"preset_id": form["engine_b_preset"]},
+        engine_a={
+            "preset_id": form["engine_a_preset"],
+            "custom_elo": (
+                int(form["engine_a_elo"])
+                if form.get("engine_a_elo", "").strip()
+                else None
+            ),
+        },
+        engine_b={
+            "preset_id": form["engine_b_preset"],
+            "custom_elo": (
+                int(form["engine_b_elo"])
+                if form.get("engine_b_elo", "").strip()
+                else None
+            ),
+        },
         opening_set_id=form["opening_set_id"],
         time_control=form["time_control"],
         pairs=int(form["pairs"]),
@@ -852,6 +950,20 @@ def admin_tournament_detail(
     opening_snap = snap.get("opening_set") or {}
     opening_plies = opening_snap.get("plies")
     bp = request.app.state.settings.base_path
+
+    from ..services.labels import tournament_engine_label
+
+    engine_a_label = tournament_engine_label(
+        session, snap.get("engine_a"),
+        tournament.engine_a_preset_id, tournament.engine_a_build_id,
+        tournament.engine_a_profile,
+    )
+    engine_b_label = tournament_engine_label(
+        session, snap.get("engine_b"),
+        tournament.engine_b_preset_id, tournament.engine_b_build_id,
+        tournament.engine_b_profile,
+    )
+
     run_again = (
         f"{bp}/admin/tournaments/new?"
         f"engine_a_preset={tournament.engine_a_preset_id or ''}"
@@ -861,6 +973,12 @@ def admin_tournament_detail(
         f"&time_control={tournament.time_control}"
         f"&pairs={tournament.requested_pairs}"
     )
+    # Run again keeps a per-match Elo override (never the fixed preset Elo).
+    for side in ("engine_a", "engine_b"):
+        custom_elo = (snap.get(side) or {}).get("custom_elo")
+        if custom_elo is not None:
+            run_again += f"&{side}_elo={custom_elo}"
+
     return templates.TemplateResponse(
         request,
         "tournament_detail.html",
@@ -873,6 +991,8 @@ def admin_tournament_detail(
             "score_percent": _score_percent(tournament),
             "opening_plies": opening_plies,
             "run_again": run_again,
+            "engine_a_label": engine_a_label,
+            "engine_b_label": engine_b_label,
             "can_delete": tournament.status in DELETABLE_STATUSES,
             "has_combined": has_combined,
             "has_summary": has_summary,
