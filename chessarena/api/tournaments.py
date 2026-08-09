@@ -993,17 +993,9 @@ def admin_tournament_detail(
 
     rated_elo = engine_rating(session, tournament)
 
-    # P4.10 bulk-analyze counts over verified games (pair color contract).
-    decisive_count = losses_count = 0
-    for g in games:
-        result = g.result or ""
-        if result in ("1-0", "0-1"):
-            decisive_count += 1
-            a_white = g.game_number % 2 == 1
-            if (a_white and result == "0-1") or (
-                not a_white and result == "1-0"
-            ):
-                losses_count += 1
+    # P4.10 bulk-analyze pending counts (verified games not ready/queued),
+    # shared with the bulk route so the buttons and the POST never drift.
+    bulk_pending = _bulk_pending_counts(games)
 
     return templates.TemplateResponse(
         request,
@@ -1021,8 +1013,8 @@ def admin_tournament_detail(
             "engine_b_label": engine_b_label,
             "game_analysis": game_analysis,
             "rated_elo": rated_elo,
-            "decisive_count": decisive_count,
-            "losses_count": losses_count,
+            "decisive_count": bulk_pending["decisive"],
+            "losses_count": bulk_pending["losses"],
             "can_delete": tournament.status in DELETABLE_STATUSES,
             "has_combined": has_combined,
             "has_summary": has_summary,
@@ -1190,8 +1182,11 @@ async def admin_tournament_analyze_bulk(
     """Queue analysis for a whole subset of a completed match (P4.10).
 
     ``scope`` is ``decisive`` (1-0 / 0-1) or ``losses`` (Engine A perspective
-    losses, using the pair color contract — odd game_number A is White).  Just
-    writes request artifacts; the idle worker analyzes them one by one.
+    losses, using the pair color contract — odd game_number A is White).
+    Only top-up semantics: games that are already ``ready`` or ``queued`` are
+    left untouched, so re-clicking never deletes finished analyses; ``failed``
+    games are re-queued.  Just writes request artifacts; the idle worker
+    analyzes them one by one.
     """
     form = dict(await request.form())
     validate_csrf_token(request, form)
@@ -1204,7 +1199,7 @@ async def admin_tournament_analyze_bulk(
             status_code=409,
             detail="only completed matches can be analyzed",
         )
-    from ..services.analysis import request_analysis
+    from ..services.analysis import analysis_state, request_analysis
 
     games = (
         session.query(Game)
@@ -1214,16 +1209,9 @@ async def admin_tournament_analyze_bulk(
     )
     selected = 0
     for g in games:
-        result = g.result or ""
-        if scope == "decisive":
-            matches = result in ("1-0", "0-1")
-        else:  # losses: Engine A perspective
-            a_white = g.game_number % 2 == 1
-            matches = (
-                (a_white and result == "0-1")
-                or (not a_white and result == "1-0")
-            )
-        if not matches:
+        if analysis_state(g) in ("ready", "queued"):
+            continue  # never destroy existing analysis
+        if not _analysis_scope_matches(g, scope):
             continue
         request_analysis(request.app.state.settings, g)
         selected += 1
@@ -1235,6 +1223,34 @@ async def admin_tournament_analyze_bulk(
         ),
         status_code=303,
     )
+
+
+def _analysis_scope_matches(g: Game, scope: str) -> bool:
+    """Shared scope selection used by the bulk route AND the page counts so
+    the two can never drift apart (P4.10)."""
+    result = g.result or ""
+    if scope == "decisive":
+        return result in ("1-0", "0-1")
+    # losses: Engine A perspective via the pair color contract.
+    a_white = g.game_number % 2 == 1
+    return (a_white and result == "0-1") or (not a_white and result == "1-0")
+
+
+def _bulk_pending_counts(games) -> dict:
+    """{scope: pending count} over verified games that are not yet ready or
+    queued — the numbers shown on the bulk-analyze buttons."""
+    from ..services.analysis import analysis_state
+
+    counts = {"decisive": 0, "losses": 0}
+    for g in games:
+        if not g.verified:
+            continue
+        if analysis_state(g) in ("ready", "queued"):
+            continue
+        for scope in ("decisive", "losses"):
+            if _analysis_scope_matches(g, scope):
+                counts[scope] += 1
+    return counts
 
 
 @admin_router.post("/admin/tournaments/{tournament_id}/rating-toggle",

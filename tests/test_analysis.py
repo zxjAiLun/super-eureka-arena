@@ -282,3 +282,45 @@ def test_bulk_analyze_rejects_unknown_scope(
     )
     r = _bulk_analyze(app_client, tid, "wins")
     assert r.status_code == 400
+
+
+def test_bulk_analyze_skips_ready_and_queued(
+    settings, engine_factory, tournament_factory, app_client
+):
+    """Bulk analyze is top-up only: ready and queued games are left alone,
+    failed games are re-queued, and the button counts show pending only."""
+    tid, gids = _bulk_game(
+        settings, engine_factory, tournament_factory,
+        ["1-0", "1-0", "0-1", "1-0"],  # all decisive; #3 is an A-side loss
+    )
+    a_dir = analysis.analysis_dir(tid)
+    a_dir.mkdir(parents=True, exist_ok=True)
+    ready_req = analysis.request_path(tid, gids[0])
+    ready_req.write_text('{"ready": true}', encoding="utf-8")
+    (analysis.result_path(tid, gids[0])).write_text("{}", encoding="utf-8")
+    queued_req = analysis.request_path(tid, gids[1])
+    queued_req.write_text('{"queued": true}', encoding="utf-8")
+    queued_before = queued_req.read_text(encoding="utf-8")
+    failed_req = analysis.request_path(tid, gids[2])
+    failed_req.write_text('{"failed": true}', encoding="utf-8")
+    (analysis.error_path(tid, gids[2])).write_text("{}", encoding="utf-8")
+    # gids[3] is not requested at all.
+
+    # Pending counts on the page: only gids[2] (failed loss) and gids[3]
+    # (not-requested A-side loss, game_number 4 -> A Black loses the 1-0).
+    page = app_client.get(f"/chessarena/admin/tournaments/{tid}")
+    assert "Analyze decisive games (2)" in page.text
+    assert "Analyze losses (2)" in page.text
+
+    r = _bulk_analyze(app_client, tid, "decisive")
+    assert r.status_code == 303
+    # ready: untouched (result still present, request not rewritten).
+    assert (analysis.result_path(tid, gids[0])).is_file()
+    assert ready_req.read_text(encoding="utf-8") == '{"ready": true}'
+    # queued: request not rewritten.
+    assert queued_req.read_text(encoding="utf-8") == queued_before
+    # failed: re-queued (error cleared, request fresh).
+    assert not (analysis.error_path(tid, gids[2])).exists()
+    assert failed_req.is_file()
+    # not_requested: now queued.
+    assert analysis.request_path(tid, gids[3]).is_file()
