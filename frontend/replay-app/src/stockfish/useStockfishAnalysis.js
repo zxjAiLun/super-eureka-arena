@@ -1,26 +1,39 @@
 // Interactive browser Stockfish analysis (P4.11 commit 2 + closure repair).
 //
-// Search lifecycle: every FEN request carries a fresh GENERATION.  The
-// request object is { gen, fen }; "pending" is the latest request and
-// "requested" is the position actually sent to the engine.  A new request
-// immediately clears the previous result, posts "stop" and an "isready"
-// barrier, and only when "readyok" arrives starts "go infinite" for the
-// pending FEN — but only if its generation was not yet served.  Because
-// matching is by generation (not by FEN string), a fast A -> B -> A
-// navigation re-serves the second A as a brand-new request, and stale
-// output from an earlier generation is always dropped.
+// Search lifecycle — the stop/bestmove barrier:
 //
-// Failures surface a visible "error" state: a worker that never answers
-// "uci" (init timeout), a barrier that never gets its "readyok" (stalled
-// engine), a load failure and runtime worker errors.  Timeouts track
-// protocol progress directly (uciReadyRef, barrier timer), never UI status.
+//   uciok -> isready -> readyok      init: isready is used ONLY at startup,
+//   -> position fen <pending>          as the liveness barrier before the
+//   -> go infinite                     first search.
+//
+//   [search A running]
+//   FEN change -> pending = {gen B, fen}
+//             -> stop                 UCI "stop" does NOT drain the old
+//             -> [all info dropped]     search: the engine can print
+//   bestmove  <- (old search ended)     readyok/info out of order.  The only
+//             -> position fen B         reliable end marker for "go infinite"
+//             -> go infinite            is the old search's BESTMOVE — info
+//                                      arriving before it belongs to the
+//                                      previous FEN and is discarded.
+//
+// Every FEN request carries a fresh GENERATION; "pending" is the latest
+// request and "requested" is the position actually sent.  Rapid navigation
+// (A -> B -> C -> A) only replaces `pending`; the in-flight stop ends with
+// one bestmove which restarts the LATEST pending generation.  Stale output
+// from an earlier generation can never land in the current panel.
+//
+// Failures surface a visible "error" state: no "uci" within 10s (init), no
+// "readyok" after the init barrier, no "bestmove" within 10s of a stop
+// (stalled engine).  Late answers self-heal by restarting the latest
+// pending generation.
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { getStockfishWorker, parseInfoLine } from "./StockfishWorker";
 
 const INIT_TIMEOUT_MS = 10000;
-const BARRIER_TIMEOUT_MS = 10000;
+const INIT_BARRIER_TIMEOUT_MS = 10000;
+const STOP_TIMEOUT_MS = 10000;
 
 export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
   const [state, setState] = useState({
@@ -34,8 +47,20 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
   const pendingRef = useRef(null); // { gen, fen } — latest request
   const requestedRef = useRef(null); // { gen, fen } — position actually sent
   const uciReadyRef = useRef(false);
+  const searchingRef = useRef(false); // a search is running (go sent)
+  const stoppingRef = useRef(false); // stop sent, waiting for bestmove
   const initTimerRef = useRef(null);
   const barrierTimerRef = useRef(null);
+  const stopTimerRef = useRef(null);
+
+  const serve = useCallback((pending) => {
+    const worker = workerRef.current;
+    if (!worker) return;
+    requestedRef.current = pending;
+    searchingRef.current = true;
+    worker.postMessage(`position fen ${pending.fen}`);
+    worker.postMessage("go infinite");
+  }, []);
 
   // Worker bring-up and message stream.
   useEffect(() => {
@@ -55,27 +80,29 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
           clearTimeout(initTimerRef.current);
           initTimerRef.current = null;
         }
+        // Init barrier: isready is only ever sent here.
+        worker.postMessage("isready");
+        if (barrierTimerRef.current) clearTimeout(barrierTimerRef.current);
+        barrierTimerRef.current = setTimeout(() => {
+          setState((s) => ({ ...s, status: "error", error: "engine unavailable" }));
+        }, INIT_BARRIER_TIMEOUT_MS);
         setState((s) => ({ ...s, status: "ready", error: null }));
       } else if (line === "readyok") {
         if (barrierTimerRef.current) {
           clearTimeout(barrierTimerRef.current);
           barrierTimerRef.current = null;
         }
+        // Init barrier passed: start the first pending FEN (if any).  A
+        // readyok is NEVER a search barrier, so a late one after a timeout
+        // only self-heals when no search is running.
         const pending = pendingRef.current;
-        if (
-          pending &&
-          (!requestedRef.current ||
-            requestedRef.current.gen !== pending.gen)
-        ) {
-          // This generation was never served (possibly a very late answer
-          // after a timeout): serve it and resume a visible search.
-          requestedRef.current = pending;
+        if (pending && !searchingRef.current && !stoppingRef.current) {
           setState((s) => ({ ...s, status: "searching", error: null }));
-          worker.postMessage(`position fen ${pending.fen}`);
-          worker.postMessage("go infinite");
+          serve(pending);
         }
       } else if (line.startsWith("info")) {
-        // Ownership: only the current generation's lines are accepted.
+        // While stopping, ALL output belongs to the old search — drop it.
+        if (stoppingRef.current) return;
         const pending = pendingRef.current;
         const requested = requestedRef.current;
         if (!pending || !requested || requested.gen !== pending.gen) return;
@@ -85,14 +112,24 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
           setState((s) => ({ ...s, result: { ...(s.result || {}), ...parsed } }));
         }
       } else if (line.startsWith("bestmove")) {
+        // The old search has REALLY ended: with "go infinite" a bestmove
+        // only follows our stop, and it is the last line the engine emits
+        // for that search.  This is the ownership barrier.
+        if (stoppingRef.current) {
+          stoppingRef.current = false;
+          if (stopTimerRef.current) {
+            clearTimeout(stopTimerRef.current);
+            stopTimerRef.current = null;
+          }
+        }
+        searchingRef.current = false;
         const pending = pendingRef.current;
-        const requested = requestedRef.current;
-        if (!pending || !requested || requested.gen !== pending.gen) return;
-        const best = line.split(" ")[1];
-        setState((s) => ({
-          ...s,
-          result: { ...(s.result || {}), best_move: best },
-        }));
+        if (pending && (!requestedRef.current || requestedRef.current.gen !== pending.gen)) {
+          // Serve the latest pending generation — this also self-heals a
+          // stop-timeout when a very late bestmove finally arrives.
+          setState((s) => ({ ...s, status: "searching", error: null }));
+          serve(pending);
+        }
       } else if (line.startsWith("Stockfish ")) {
         setState((s) => (s.version ? s : { ...s, version: line.trim() }));
       }
@@ -101,8 +138,8 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
       setState((s) => ({ ...s, status: "error", error: "engine unavailable" }));
     };
     // Init timeout: a worker that loads but never answers "uci" must not
-    // leave the page stuck on "searching" forever.  Tracked via uciReadyRef,
-    // not the UI status (which the FEN effect sets to "searching" at once).
+    // leave the page stuck on "searching".  Tracked via uciReadyRef, not
+    // the UI status (which the FEN effect sets to "searching" at once).
     initTimerRef.current = setTimeout(() => {
       if (!uciReadyRef.current) {
         setState((s) => ({ ...s, status: "error", error: "engine unavailable" }));
@@ -113,14 +150,17 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
     return () => {
       if (initTimerRef.current) clearTimeout(initTimerRef.current);
       if (barrierTimerRef.current) clearTimeout(barrierTimerRef.current);
+      if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
       worker.removeEventListener("message", onMessage);
       worker.removeEventListener("error", onError);
     };
-  }, [enabled, basePath, workerUrl]);
+  }, [enabled, basePath, workerUrl, serve]);
 
-  // A FEN change starts exactly one search for that position.  Every change
-  // (even back to a previously served FEN) is a new generation, so the
-  // readyok barrier re-serves it.
+  // A FEN change starts exactly one search for that position: bump the
+  // generation, clear the visible result, and either stop the active search
+  // (its bestmove picks up the latest pending) or serve directly when idle.
+  // Rapid navigation only replaces `pending` — one stop, one bestmove, one
+  // restart.
   useEffect(() => {
     if (!enabled || !fen) return undefined;
     genRef.current += 1;
@@ -132,16 +172,22 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
       error: null,
     }));
     const worker = workerRef.current;
-    if (!worker) return undefined; // barrier is queued once the worker exists
-    worker.postMessage("stop");
-    worker.postMessage("isready");
-    if (barrierTimerRef.current) clearTimeout(barrierTimerRef.current);
-    barrierTimerRef.current = setTimeout(() => {
-      // The engine never answered the isready barrier: it is stalled.
-      setState((s) => ({ ...s, status: "error", error: "engine unavailable" }));
-    }, BARRIER_TIMEOUT_MS);
+    if (!worker || !uciReadyRef.current) return undefined; // served at init readyok
+    if (stoppingRef.current) return undefined; // in-flight stop will restart
+    if (searchingRef.current) {
+      stoppingRef.current = true;
+      worker.postMessage("stop");
+      if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+      stopTimerRef.current = setTimeout(() => {
+        if (stoppingRef.current) {
+          setState((s) => ({ ...s, status: "error", error: "engine unavailable" }));
+        }
+      }, STOP_TIMEOUT_MS);
+    } else {
+      serve(pendingRef.current);
+    }
     return undefined;
-  }, [fen, enabled]);
+  }, [fen, enabled, serve]);
 
   return {
     status: state.status,

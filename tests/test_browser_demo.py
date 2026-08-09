@@ -51,6 +51,37 @@ PLY4_FEN = "rnb1kbnr/ppp1pppp/8/3q4/8/8/PPPP1PPP/RNBQKBNR w KQkq - 0 3"
 PLY5_FEN = "rnb1kbnr/ppp1pppp/8/3q4/8/2N5/PPPP1PPP/R1BQKBNR b KQkq - 1 3"
 PLY6_FEN = "rnbqkbnr/ppp1pppp/8/8/8/2N5/PPPP1PPP/R1BQKBNR w KQkq - 2 4"
 
+# A fake engine that reproduces the UCI out-of-order race: on a FEN switch
+# the hook sends "stop" (and, in older code, "isready").  The fake answers
+# isready with readyok IMMEDIATELY (so a readyok-based barrier starts the new
+# FEN), and ~50ms later — after the new FEN's genuine info has been posted —
+# emits the OLD search's late info +5.00 and its bestmove.  A correct
+# stop/bestmove barrier drops that stale info; a readyok barrier accepts it
+# and the +5.00 sticks to the new FEN's panel.
+FAKE_STALE_OUTPUT_WORKER = (
+    "let stopSeen = false;\n"
+    "function staleOutput() {\n"
+    "  self.postMessage('info depth 7 score cp 500 nodes 2 nps 1 time 2 pv b1c3');\n"
+    "  self.postMessage('bestmove b1c3');\n"
+    "}\n"
+    "self.onmessage = (e) => {\n"
+    "  const msg = e.data;\n"
+    "  if (msg === 'uci') {\n"
+    "    self.postMessage('Stockfish 2019-08-15 FakeEngine');\n"
+    "    self.postMessage('uciok');\n"
+    "  } else if (msg === 'isready') {\n"
+    "    self.postMessage('readyok');\n"
+    "  } else if (msg.startsWith('go')) {\n"
+    "    self.postMessage('info depth 6 score cp 100 nodes 1 nps 1 time 1 pv a2a3');\n"
+    "  } else if (msg === 'stop') {\n"
+    "    stopSeen = true;\n"
+    "    setTimeout(() => {\n"
+    "      if (stopSeen) { stopSeen = false; staleOutput(); }\n"
+    "    }, 50);\n"
+    "  }\n"
+    "};\n"
+)
+
 
 FEN_HEADER_PGN = "\n".join(
     [
@@ -1536,6 +1567,47 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
                 f"got {hung_panel.inner_text()!r}"
             )
             hung_page.close()
+
+            # P1 regression: UCI "stop" does not drain the old search.  A
+            # fake engine answers the FEN switch with readyok first (the old
+            # code starts the new FEN right there) and only then emits the
+            # OLD search's late info +5.00 and bestmove.  That stale output
+            # must never land in the new FEN's panel.
+            fake_page = browser.new_page()
+            fake_errors: list[str] = []
+            fake_page.on("pageerror", lambda exc: fake_errors.append(str(exc)))
+            fake_page.route(
+                "**/stockfish.wasm.js",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/javascript",
+                    body=FAKE_STALE_OUTPUT_WORKER,
+                ),
+            )
+            fake_page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
+            fake_panel = fake_page.locator(".analysis-panel")
+            fake_panel.wait_for(state="visible", timeout=20000)
+            fake_page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && el.innerText.includes('1.00');
+                }""",
+                timeout=20000,
+            )
+            fake_page.keyboard.press("ArrowRight")
+            fake_page.wait_for_timeout(1200)
+            score_text = fake_page.locator(".analysis-score").inner_text()
+            assert "1.00" in score_text, (
+                f"new FEN must show its genuine score, got {score_text!r}"
+            )
+            assert "5.00" not in score_text, (
+                "stale old-search info leaked into the new FEN: "
+                f"{score_text!r}"
+            )
+            assert "Stockfish 2019-08-15" in (
+                fake_page.locator(".analysis-engine").inner_text()
+            )
+            fake_page.close()
 
             browser.close()
     finally:
