@@ -26,10 +26,19 @@
 // "readyok" after the init barrier, no "bestmove" within 10s of a stop
 // (stalled engine).  Late answers self-heal by restarting the latest
 // pending generation.
+//
+// Session lifecycle: disabling (enabled -> false, e.g. a Live match flipping
+// to COMPLETED) or unmounting TERMINATES the worker — a running "go
+// infinite" must never outlive the session that started it.  All refs are
+// reset, so a later re-enable starts a clean engine from scratch.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { getStockfishWorker, parseInfoLine } from "./StockfishWorker";
+import {
+  disposeStockfishWorker,
+  getStockfishWorker,
+  parseInfoLine,
+} from "./StockfishWorker";
 
 const INIT_TIMEOUT_MS = 10000;
 const INIT_BARRIER_TIMEOUT_MS = 10000;
@@ -153,6 +162,18 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
       if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
       worker.removeEventListener("message", onMessage);
       worker.removeEventListener("error", onError);
+      // Disabling (e.g. a Live match flipping to COMPLETED) or unmount ends
+      // the whole analysis session: terminate the singleton worker instead
+      // of letting "go infinite" keep burning a CPU core with no listener.
+      // No stop/bestmove dance — terminate() is the session boundary, and
+      // all refs are reset so a later re-enable starts a clean engine.
+      disposeStockfishWorker(worker);
+      workerRef.current = null;
+      uciReadyRef.current = false;
+      searchingRef.current = false;
+      stoppingRef.current = false;
+      requestedRef.current = null;
+      pendingRef.current = null;
     };
   }, [enabled, basePath, workerUrl, serve]);
 

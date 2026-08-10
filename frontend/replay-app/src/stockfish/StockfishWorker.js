@@ -26,6 +26,21 @@ export function getStockfishWorker(basePath, workerUrl) {
   return worker;
 }
 
+// Dispose an analysis session: terminate the singleton worker and drop it so
+// the next enabled session starts a fresh engine.  terminate() is the session
+// boundary — a running "go infinite" must never outlive the page/session that
+// started it (e.g. a Live match flipping to COMPLETED).
+export function disposeStockfishWorker(instance) {
+  if (worker === instance && instance) {
+    worker = null;
+    try {
+      instance.terminate();
+    } catch (e) {
+      // Already terminated; nothing to do.
+    }
+  }
+}
+
 // White-perspective score from a UCI "info ..." line.  Field names mirror the
 // server diagnostics positions (score_cp / best_move) so the shared
 // formatScoreOf / shareOf helpers work unchanged.

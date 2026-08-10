@@ -1973,6 +1973,189 @@ def test_browser_live_stockfish_eval_bar(
             proc.kill()
 
 
+def test_browser_live_dispose_on_completed(
+    settings, engine_factory, registered
+):
+    """P4.11 commit 3 repair: a Live match flipping live -> COMPLETED must
+    terminate the browser Stockfish session (no orphaned 'go infinite'
+    burning a CPU core), and re-entering a Live match starts a fresh worker
+    and produces a score again."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    from chessarena.models import COMPLETED, RUNNING, PairJob, Tournament, utcnow
+
+    def _make_running(name):
+        with engine_factory() as session:
+            tournament = Tournament(
+                id=str(uuid.uuid4()),
+                name=name,
+                status=RUNNING,
+                engine_a_build_id=manifest["build_id"],
+                engine_a_profile="current-final",
+                engine_b_build_id=manifest["build_id"],
+                engine_b_profile="current",
+                opening_set_id=opening_manifest["opening_set_id"],
+                time_control="blitz_3_2",
+                requested_pairs=1,
+                config_snapshot={
+                    "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                    "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                    "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                    "time_control": "blitz_3_2",
+                },
+            )
+            session.add(tournament)
+            session.flush()
+            tournament.started_at = utcnow()
+            pair = PairJob(
+                id=str(uuid.uuid4()),
+                tournament_id=tournament.id,
+                pair_index=0,
+                opening_index=0,
+                status=RUNNING,
+            )
+            session.add(pair)
+            session.flush()
+            run_dir = (
+                settings.run_root / tournament.id / "pairs" / "000000" / "attempt-01"
+            )
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "opening.epd").write_text(LIVE_FEN_A + "\n", encoding="utf-8")
+            (run_dir / "stdout.log").write_text(
+                "Started game 1 of 2 (EngineA vs EngineB)\n"
+                + _live_stream_lines("", "EngineA", 0, 45, 12, "e2e4 e7e5", "e2e4")
+                + "\n",
+                encoding="utf-8",
+            )
+            pair.run_directory = str(run_dir)
+            session.commit()
+            return tournament.id
+
+    tid1 = _make_running("live-dispose-a")
+    tid2 = _make_running("live-dispose-b")
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/live?tournament_id={tid1}")
+
+        from chessarena.models import Tournament as _Tournament
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+            page.route(
+                "**/stockfish.wasm.js",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/javascript",
+                    body=FAKE_STALE_OUTPUT_WORKER,
+                ),
+            )
+            page.add_init_script(
+                """
+                window.__goCount = 0;
+                window.__terminateCount = 0;
+                const __origPost = Worker.prototype.postMessage;
+                Worker.prototype.postMessage = function (msg) {
+                  if (typeof msg === 'string' && msg.startsWith('go ')) {
+                    window.__goCount += 1;
+                  }
+                  return __origPost.apply(this, arguments);
+                };
+                const __origTerminate = Worker.prototype.terminate;
+                Worker.prototype.terminate = function () {
+                  window.__terminateCount += 1;
+                  return __origTerminate.apply(this, arguments);
+                };
+                """
+            )
+            page.goto(f"{base}/live?tournament_id={tid1}", wait_until="domcontentloaded")
+            panel = page.locator(".analysis-panel")
+            panel.wait_for(state="visible", timeout=30000)
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && el.innerText.includes('1.00');
+                }""",
+                timeout=30000,
+            )
+            assert page.evaluate("window.__goCount") == 1
+            assert page.evaluate("window.__terminateCount") == 0, (
+                "worker must still be alive while the match is live"
+            )
+
+            # The match flips to COMPLETED: the next poll shows the finished
+            # state and the browser Stockfish session must be disposed.
+            with engine_factory() as session:
+                t = session.query(_Tournament).filter(
+                    _Tournament.id == tid1
+                ).one()
+                t.status = COMPLETED
+                session.commit()
+
+            page.wait_for_function(
+                """() => window.__terminateCount === 1""",
+                timeout=20000,
+            )
+            assert "finished" in page.locator("body").inner_text().lower(), (
+                "page must show the completed state"
+            )
+            assert not console_errors, f"browser console errors: {console_errors}"
+
+            # Re-entering a Live match starts a fresh worker session and
+            # produces a score again (no stuck refs from the old session).
+            page.goto(f"{base}/live?tournament_id={tid2}", wait_until="domcontentloaded")
+            panel.wait_for(state="visible", timeout=30000)
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && el.innerText.includes('1.00');
+                }""",
+                timeout=30000,
+            )
+            assert page.evaluate("window.__goCount") == 1, (
+                "re-entered session must start exactly one search"
+            )
+            assert page.evaluate("window.__terminateCount") == 0, (
+                "the fresh session's worker must be alive"
+            )
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def test_browser_live_stockfish_failure_isolated(
     settings, engine_factory, registered
 ):
