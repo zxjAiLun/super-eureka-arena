@@ -248,15 +248,22 @@ export default function LiveApp({ tournamentId, basePath }) {
         </div>
         <div className="board-stage">
           {/* P4.11 commit 3: the eval bar reflects ONLY the browser
-              Stockfish evaluation — never a match engine's self-eval. */}
-          {hasBrowserScore && analysisEnabled && (
-            <div className="eval-bar" aria-label="Evaluation">
+              Stockfish evaluation — never a match engine's self-eval.  The
+              slot is always reserved so the board never moves. */}
+          <div
+            className={
+              "eval-bar" +
+              (hasBrowserScore && analysisEnabled ? "" : " eval-bar-empty")
+            }
+            aria-label="Evaluation"
+          >
+            {hasBrowserScore && analysisEnabled && (
               <div
                 className="eval-bar-white"
                 style={{ height: `${shareForUi(browser) * 100}%` }}
               />
-            </div>
-          )}
+            )}
+          </div>
           <div className="board-wrap" data-fen={fen}>
             <Chessboard options={{ position: fen, allowDragging: false }} />
           </div>

@@ -362,3 +362,108 @@ def test_engine_rating_helper(engine_factory, tournament_factory):
     assert row is not None
     assert row["display_name"] == "ChessEngine Production"
     assert row["games"] == 10
+
+
+def _self_play_rated(engine_factory, tournament_factory, games=10):
+    """A rated match where both sides share the SAME fingerprint."""
+    from chessarena.models import EnginePreset
+
+    tid = tournament_factory(name="self-play", pairs=games // 2,
+                             time_control="blitz_3_2", status=COMPLETED)
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        t.completed_pairs = games // 2
+        t.candidate_wins = games // 2
+        t.candidate_losses = games // 2
+        t.draws = 0
+        t.finished_at = utcnow()
+        t.arena_elo_enabled = True
+        preset = (
+            session.query(EnginePreset)
+            .filter(EnginePreset.preset_id == "chessengine-production")
+            .one()
+        )
+        build = (
+            session.query(EngineBuild)
+            .filter(EngineBuild.build_id == preset.build_id)
+            .one()
+        )
+        side = {
+            "preset_id": preset.preset_id,
+            "display_name": preset.display_name,
+            "build_id": build.build_id,
+            "command_args": list(preset.command_args or []),
+            "uci_options": dict(preset.uci_options or {}),
+            "binary_sha256": build.binary_sha256,
+        }
+        t.config_snapshot = {"engine_a": dict(side), "engine_b": dict(side)}
+        pair = t.pair_jobs[0]
+        pair.status = "COMPLETED"
+        pair.return_code = 0
+        for i in range(games):
+            game_number = i + 1
+            a_white = game_number % 2 == 1
+            result = "1-0" if a_white else "0-1"
+            session.add(
+                Game(
+                    tournament_id=tid,
+                    pair_job_id=pair.id,
+                    game_number=game_number,
+                    white_engine="EngineA" if a_white else "EngineB",
+                    black_engine="EngineB" if a_white else "EngineA",
+                    opening_index=0,
+                    result=result,
+                    pgn_path="/unused/self-play.pgn",
+                    verified=True,
+                )
+            )
+        session.commit()
+    return tid
+
+
+def test_same_fingerprint_self_play_never_counts(
+    engine_factory, tournament_factory
+):
+    """P4.12 repair: a participant playing itself must not enter the rating
+    statistics at all (Games/W-D-L would be double-counted; Elo deltas would
+    cancel but the stats would be wrong)."""
+    _self_play_rated(engine_factory, tournament_factory, games=10)
+    with engine_factory() as session:
+        row = _engine_row(session)
+    assert row is not None
+    assert row["rating"] == 1800, row["rating"]
+    assert row["games"] == 0
+    assert (row["wins"], row["draws"], row["losses"]) == (0, 0, 0)
+
+
+def test_history_only_participant_scoped_to_its_pool(
+    engine_factory, tournament_factory
+):
+    """P4.12 repair: an archived/history-only fingerprint appears ONLY in the
+    pool where it has rated history — never as an 1800 ghost in other pools."""
+    ghost = {
+        "preset_id": "archived-engine",
+        "display_name": "Archived Engine",
+        "build_id": "engine-build",
+        "command_args": ["--profile", "legacy"],
+        "uci_options": {},
+        "binary_sha256": "archived-sha",
+    }
+    _completed_rated(engine_factory, tournament_factory,
+                     wins=3, losses=3, draws=0, anchor_a=False,
+                     anchor=SF_A, engine=ghost)
+    with engine_factory() as session:
+        pools = ratings.compute_ratings(session)
+    blitz = {r["display_name"]: r for r in pools["blitz_3_2"]["engines"]}
+    bullet = {r["display_name"]: r for r in pools["bullet_1_0"]["engines"]}
+    rapid = {r["display_name"]: r for r in pools["rapid_5_3"]["engines"]}
+    assert "Archived Engine" in blitz
+    assert blitz["Archived Engine"]["status"] == "rated"
+    assert blitz["Archived Engine"]["games"] == 6
+    assert "Archived Engine" not in bullet, (
+        "history-only participant must not ghost into the bullet pool"
+    )
+    assert "Archived Engine" not in rapid
+    # Public participants still show in every pool even with zero games.
+    assert "ChessEngine Legacy Baseline" in bullet
+    assert "ChessEngine Legacy Baseline" in rapid

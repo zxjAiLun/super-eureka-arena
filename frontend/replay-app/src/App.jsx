@@ -346,9 +346,13 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
 
   const scoreText = formatScoreOf(pos);
   const pvText = pos ? uciPvToSan(pos.fen, pos.pv) : [];
-  // The eval bar prefers the live browser Stockfish result.
+  // P4.12: the left eval bar belongs ONLY to the browser Stockfish analysis
+  // (the server diagnostics stay in the diagnostics panel).  A fixed-width
+  // slot is ALWAYS reserved next to the board so the board never shifts when
+  // analysis turns on/off or the first score arrives.
   const hasBrowserScore = browser.score_cp != null || browser.mate != null;
-  const barPos = hasBrowserScore ? browser : pos;
+  const barActive = analysisEnabled && hasBrowserScore;
+  const barShare = barActive ? shareForUi(browser) : null;
 
   return (
     <div className="replay" ref={replayRef} onWheel={onWheel}>
@@ -360,14 +364,17 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           <span className="player-name">{game.black_engine}</span>
         </div>
         <div className="board-stage">
-          {barPos && (
-            <div className="eval-bar" aria-label="Evaluation">
+          <div
+            className={"eval-bar" + (barShare == null ? " eval-bar-empty" : "")}
+            aria-label="Evaluation"
+          >
+            {barShare != null && (
               <div
                 className="eval-bar-white"
-                style={{ height: `${shareForUi(barPos) * 100}%` }}
+                style={{ height: `${barShare * 100}%` }}
               />
-            </div>
-          )}
+            )}
+          </div>
           <div className="board-wrap" data-fen={fen}>
             <Chessboard options={{ position: fen, allowDragging: false }} />
           </div>

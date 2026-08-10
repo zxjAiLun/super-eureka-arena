@@ -1436,24 +1436,28 @@ def test_browser_analysis_off_by_default_and_board_stable(
                     """() => {
                         const r = document.querySelector('.board-wrap')
                             .getBoundingClientRect();
-                        return [r.width, r.height];
+                        return [r.x, r.y, r.width, r.height];
                     }"""
                 )
 
             def close_to(a, b, what):
                 assert all(abs(x - y) <= 1 for x, y in zip(a, b)), (
-                    f"{what}: board width/height moved {a} -> {b}"
+                    f"{what}: board position/size moved {a} -> {b}"
                 )
 
             panel = page.locator(".analysis-panel")
             panel.wait_for(state="visible", timeout=20000)
 
-            # OFF by default: no worker, no search, explicit start card.
+            # OFF by default: no worker, no search, explicit start card, and
+            # the eval bar slot is EMPTY (diagnostics never light it up).
             assert "Runs locally in this browser" in panel.inner_text()
             assert page.evaluate("window.__workerCount") == 0, (
                 "no worker may exist while analysis is off"
             )
             assert page.evaluate("window.__goCount") == 0
+            assert "eval-bar-empty" in (
+                page.locator(".eval-bar").get_attribute("class")
+            )
             b0 = bbox()
 
             # ON: worker created, exactly one search at default depth 18.
@@ -1531,10 +1535,15 @@ def test_browser_analysis_off_by_default_and_board_stable(
             )
             close_to(b0, bbox(), "depth 22")
 
-            # Stop analysis terminates the worker; panel returns to OFF.
+            # Stop analysis terminates the worker; panel returns to OFF and
+            # the eval bar slot empties (board never moved).
             page.locator(".analysis-controls button", has_text="Stop analysis").click()
             assert page.evaluate("window.__terminateCount") == 1
             assert "Start analysis" in panel.inner_text()
+            assert "eval-bar-empty" in (
+                page.locator(".eval-bar").get_attribute("class")
+            )
+            close_to(b0, bbox(), "stop analysis")
 
             # Reload: still OFF (no localStorage persistence).
             page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")

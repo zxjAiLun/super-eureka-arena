@@ -159,8 +159,19 @@ def compute_ratings(session) -> dict:
     """{time_control: {"engines": [rows incl. anchors], "anchors": [...]}}.
 
     Each engine row: fingerprint, display_name, rating (int), games, wins,
-    draws, losses, status (fixed | initial | rated).  Deterministic."""
-    participants = _participant_base(session)
+    draws, losses, status (fixed | initial | rated).  Deterministic.
+
+    Public/enabled participants appear in EVERY pool (even with zero games);
+    history-only fingerprints (archived/hidden configs) appear ONLY in the
+    pools where they actually have rated history.
+    """
+    public_participants = _participant_base(session)
+    history_by_tc: dict[str, dict[str, dict]] = {
+        tc: {} for tc in TIME_CONTROLS
+    }
+    anchor_by_tc: dict[str, dict[str, dict]] = {
+        tc: {} for tc in TIME_CONTROLS
+    }
     pools: dict[str, list] = {tc: [] for tc in TIME_CONTROLS}
 
     matches = (
@@ -179,19 +190,19 @@ def compute_ratings(session) -> dict:
         side_a, side_b = snap.get("engine_a") or {}, snap.get("engine_b") or {}
         fp_a = engine_fingerprint(side_a)
         fp_b = engine_fingerprint(side_b)
-        for fp, side in ((fp_a, side_a), (fp_b, side_b)):
-            participants.setdefault(fp, _history_side(side))
+        history_by_tc[tc].setdefault(fp_a, _history_side(side_a))
+        history_by_tc[tc].setdefault(fp_b, _history_side(side_b))
         anchor_a = is_anchor(session, side_a)
         anchor_b = is_anchor(session, side_b)
         if anchor_a:
-            participants[fp_a] = {
+            anchor_by_tc[tc][fp_a] = {
                 "display_name": side_a.get("display_name")
                 or side_a.get("preset_id") or "unknown",
                 "is_anchor": True,
                 "anchor_rating": anchor_rating(side_a),
             }
         if anchor_b:
-            participants[fp_b] = {
+            anchor_by_tc[tc][fp_b] = {
                 "display_name": side_b.get("display_name")
                 or side_b.get("preset_id") or "unknown",
                 "is_anchor": True,
@@ -217,8 +228,18 @@ def compute_ratings(session) -> dict:
 
     result: dict[str, dict] = {}
     for tc, pool_games in pools.items():
+        merged: dict[str, dict] = {}
+        for fp, meta in public_participants.items():
+            merged[fp] = meta
+        # History-only fingerprints join only the pools they played in.
+        for fp, meta in history_by_tc[tc].items():
+            merged.setdefault(fp, meta)
+        # Snapshot anchors override whatever the base metadata said.
+        for fp, meta in anchor_by_tc[tc].items():
+            merged[fp] = meta
+
         rows: dict[str, dict] = {}
-        for fp, base in participants.items():
+        for fp, base in merged.items():
             anchor_elo = base.get("anchor_rating")
             rows[fp] = {
                 "fingerprint": fp,
@@ -235,6 +256,11 @@ def compute_ratings(session) -> dict:
                 "losses": 0,
             }
         for _, fp_a, fp_b, sa in sorted(pool_games):
+            # Same-fingerprint self-play carries no relative-strength
+            # information (and would double-count Games/W-D-L), so the game
+            # never enters the rating statistics.
+            if fp_a == fp_b:
+                continue
             a = rows.get(fp_a)
             b = rows.get(fp_b)
             if a is None or b is None:

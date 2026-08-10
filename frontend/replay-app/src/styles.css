@@ -72,6 +72,12 @@ main {
   margin: 6px 0;
 }
 
+/* The slot is always reserved so the board never shifts; an EMPTY slot is
+   dimmed to read as a lane, not as an active evaluation. */
+.eval-bar-empty {
+  opacity: 0.3;
+}
+
 .eval-bar-white {
   position: absolute;
   bottom: 0;
