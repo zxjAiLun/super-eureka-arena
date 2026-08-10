@@ -1,5 +1,14 @@
 /* Modern replay demo — dark theme, responsive. */
 
+/* P4.12: the server base stylesheet centers `main` with auto margins, which
+   would shrink-wrap the whole replay to the side column's content width
+   (making the board react to panel content).  On the app pages the replay
+   fills the main area deterministically instead. */
+main {
+  margin: 0;
+  max-width: none;
+}
+
 .demo-message {
   padding: 2rem;
   text-align: center;
@@ -31,8 +40,22 @@
   height: 100%;
 }
 
+/* P4.12: the eval bar lives LEFT of the board, outside it, so it can never
+   cover any file; the board stage is CSS-sized purely from the viewport
+   (never from page content), so no analysis/diagnostics content change can
+   move or resize the board. */
+.board-stage {
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0.5rem;
+  width: 100%;
+}
+
 .board-wrap {
   position: relative;
+  width: min(calc((100vw - 4.5rem) / 2), calc(100vh - 210px));
+  aspect-ratio: 1 / 1;
   background: var(--demo-board-bg, #10141a);
   border-radius: 10px;
   padding: 6px;
@@ -40,14 +63,13 @@
 }
 
 .eval-bar {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  bottom: 6px;
-  width: 16px;
+  position: relative;
+  width: 14px;
+  flex: 0 0 auto;
   background: #262a31;
   border-radius: 4px;
   overflow: hidden;
+  margin: 6px 0;
 }
 
 .eval-bar-white {
@@ -131,6 +153,46 @@
 .analysis-actions button:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* P4.12: analysis controls (Start/Stop + finite depth select). */
+.analysis-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-top: 0.2rem;
+}
+
+.analysis-controls button {
+  background: #222a35;
+  color: #dbe4ef;
+  border: 1px solid #2d343f;
+  border-radius: 6px;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.analysis-controls button:hover {
+  background: #2b3644;
+}
+
+.analysis-depth {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-size: 0.8rem;
+  color: #9aa4b2;
+}
+
+.analysis-depth select {
+  background: #222a35;
+  color: #dbe4ef;
+  border: 1px solid #2d343f;
+  border-radius: 6px;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.8rem;
 }
 
 .move-mark {
@@ -359,5 +421,8 @@
   }
   .replay-side-col {
     width: 100%;
+  }
+  .board-wrap {
+    width: min(100%, calc(100vh - 210px));
   }
 }

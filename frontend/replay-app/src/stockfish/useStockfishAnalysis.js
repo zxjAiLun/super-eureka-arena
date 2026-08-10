@@ -1,36 +1,37 @@
-// Interactive browser Stockfish analysis (P4.11 commit 2 + closure repair).
+// Interactive browser Stockfish analysis (P4.11 commits 2-4 + P4.12 commit 1).
 //
 // Search lifecycle — the stop/bestmove barrier:
 //
 //   uciok -> isready -> readyok      init: isready is used ONLY at startup,
 //   -> position fen <pending>          as the liveness barrier before the
-//   -> go infinite                     first search.
+//   -> go depth <N>                    first search.
 //
 //   [search A running]
-//   FEN change -> pending = {gen B, fen}
+//   FEN change / depth change
+//             -> pending = {gen B, fen B, depth}
 //             -> stop                 UCI "stop" does NOT drain the old
 //             -> [all info dropped]     search: the engine can print
 //   bestmove  <- (old search ended)     readyok/info out of order.  The only
-//             -> position fen B         reliable end marker for "go infinite"
-//             -> go infinite            is the old search's BESTMOVE — info
-//                                      arriving before it belongs to the
-//                                      previous FEN and is discarded.
+//             -> position fen B         reliable end marker is the old
+//             -> go depth N             search's BESTMOVE.
 //
-// Every FEN request carries a fresh GENERATION; "pending" is the latest
-// request and "requested" is the position actually sent.  Rapid navigation
-// (A -> B -> C -> A) only replaces `pending`; the in-flight stop ends with
-// one bestmove which restarts the LATEST pending generation.  Stale output
-// from an earlier generation can never land in the current panel.
+// Every request carries a fresh GENERATION; "pending" is the latest request
+// and "requested" is the position actually sent.  Rapid navigation only
+// replaces `pending`; the in-flight stop ends with one bestmove which
+// restarts the LATEST pending generation.
+//
+// Finite depth (P4.12): a search that finishes NATURALLY (the engine reached
+// `go depth <N>` and sent bestmove on its own) keeps the final eval/PV and
+// moves to status "ready" — no restart, no stale ownership change.
 //
 // Failures surface a visible "error" state: no "uci" within 10s (init), no
 // "readyok" after the init barrier, no "bestmove" within 10s of a stop
 // (stalled engine).  Late answers self-heal by restarting the latest
 // pending generation.
 //
-// Session lifecycle: disabling (enabled -> false, e.g. a Live match flipping
-// to COMPLETED) or unmounting TERMINATES the worker — a running "go
-// infinite" must never outlive the session that started it.  All refs are
-// reset, so a later re-enable starts a clean engine from scratch.
+// Session lifecycle: disabling (enabled -> false) or unmounting TERMINATES
+// the worker — a running search must never outlive the session that started
+// it.  All refs are reset, so a later re-enable starts a clean engine.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -43,8 +44,15 @@ import {
 const INIT_TIMEOUT_MS = 10000;
 const INIT_BARRIER_TIMEOUT_MS = 10000;
 const STOP_TIMEOUT_MS = 10000;
+const DEFAULT_DEPTH = 18;
 
-export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
+export function useStockfishAnalysis({
+  fen,
+  enabled,
+  basePath,
+  workerUrl,
+  depth = DEFAULT_DEPTH,
+}) {
   const [state, setState] = useState({
     status: "idle", // idle | ready | searching | error
     result: null,
@@ -53,8 +61,8 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
   });
   const workerRef = useRef(null);
   const genRef = useRef(0);
-  const pendingRef = useRef(null); // { gen, fen } — latest request
-  const requestedRef = useRef(null); // { gen, fen } — position actually sent
+  const pendingRef = useRef(null); // { gen, fen, depth } — latest request
+  const requestedRef = useRef(null); // { gen, fen, depth } — actually sent
   const uciReadyRef = useRef(false);
   const searchingRef = useRef(false); // a search is running (go sent)
   const stoppingRef = useRef(false); // stop sent, waiting for bestmove
@@ -68,7 +76,7 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
     requestedRef.current = pending;
     searchingRef.current = true;
     worker.postMessage(`position fen ${pending.fen}`);
-    worker.postMessage("go infinite");
+    worker.postMessage(`go depth ${pending.depth}`);
   }, []);
 
   // Worker bring-up and message stream.
@@ -121,10 +129,8 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
           setState((s) => ({ ...s, result: { ...(s.result || {}), ...parsed } }));
         }
       } else if (line.startsWith("bestmove")) {
-        // The old search has REALLY ended: with "go infinite" a bestmove
-        // only follows our stop, and it is the last line the engine emits
-        // for that search.  This is the ownership barrier.
-        if (stoppingRef.current) {
+        const wasStopping = stoppingRef.current;
+        if (wasStopping) {
           stoppingRef.current = false;
           if (stopTimerRef.current) {
             clearTimeout(stopTimerRef.current);
@@ -132,10 +138,18 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
           }
         }
         searchingRef.current = false;
+        if (!wasStopping) {
+          // Natural completion (finite `go depth N` reached): the final
+          // eval/PV stays on the panel, the session reports "ready" and
+          // nothing restarts.
+          setState((s) => ({ ...s, status: "ready" }));
+          return;
+        }
+        // The stopped search REALLY ended: serve the latest pending
+        // generation — this also self-heals a stop-timeout when a very
+        // late bestmove finally arrives.
         const pending = pendingRef.current;
         if (pending && (!requestedRef.current || requestedRef.current.gen !== pending.gen)) {
-          // Serve the latest pending generation — this also self-heals a
-          // stop-timeout when a very late bestmove finally arrives.
           setState((s) => ({ ...s, status: "searching", error: null }));
           serve(pending);
         }
@@ -162,11 +176,9 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
       if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
       worker.removeEventListener("message", onMessage);
       worker.removeEventListener("error", onError);
-      // Disabling (e.g. a Live match flipping to COMPLETED) or unmount ends
-      // the whole analysis session: terminate the singleton worker instead
-      // of letting "go infinite" keep burning a CPU core with no listener.
-      // No stop/bestmove dance — terminate() is the session boundary, and
-      // all refs are reset so a later re-enable starts a clean engine.
+      // Disabling or unmounting ends the whole analysis session: terminate
+      // the singleton worker instead of letting a search keep burning a CPU
+      // core with no listener.  All refs reset for a clean re-enable.
       disposeStockfishWorker(worker);
       workerRef.current = null;
       uciReadyRef.current = false;
@@ -177,15 +189,15 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
     };
   }, [enabled, basePath, workerUrl, serve]);
 
-  // A FEN change starts exactly one search for that position: bump the
-  // generation, clear the visible result, and either stop the active search
-  // (its bestmove picks up the latest pending) or serve directly when idle.
-  // Rapid navigation only replaces `pending` — one stop, one bestmove, one
-  // restart.
+  // A FEN or depth change starts exactly one search for that position:
+  // bump the generation, clear the visible result, and either stop the
+  // active search (its bestmove picks up the latest pending) or serve
+  // directly when idle.  Rapid navigation only replaces `pending` — one
+  // stop, one bestmove, one restart.
   useEffect(() => {
     if (!enabled || !fen) return undefined;
     genRef.current += 1;
-    pendingRef.current = { gen: genRef.current, fen };
+    pendingRef.current = { gen: genRef.current, fen, depth };
     setState((s) => ({
       ...s, // keep the captured engine version across navigations
       status: "searching",
@@ -208,7 +220,7 @@ export function useStockfishAnalysis({ fen, enabled, basePath, workerUrl }) {
       serve(pendingRef.current);
     }
     return undefined;
-  }, [fen, enabled, serve]);
+  }, [fen, enabled, depth, serve]);
 
   return {
     status: state.status,

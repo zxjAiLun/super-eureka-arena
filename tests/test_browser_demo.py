@@ -1308,6 +1308,250 @@ def test_browser_replay_black_to_move_fen(settings, engine_factory, registered):
         except subprocess.TimeoutExpired:
             proc.kill()
 
+def test_browser_analysis_off_by_default_and_board_stable(
+    settings, engine_factory, registered
+):
+    """P4.12 commit 1: browser analysis is OFF by default (no worker exists
+    until Start is clicked, no localStorage persistence), Stop terminates the
+    worker, finite depth (default 18, switchable to 22) works, and the board
+    bounding box never moves while analysis panels appear / depth grows / PV
+    lengthens / the user navigates."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="e2e-p412",
+            status=COMPLETED,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=1,
+            completed_pairs=1,
+            config_snapshot={
+                "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        from chessarena.models import PairJob
+
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status="COMPLETED",
+        )
+        session.add(pair)
+        session.flush()
+        pgn_path = settings.run_root / "p412-match.pgn"
+        pgn_path.parent.mkdir(parents=True, exist_ok=True)
+        pgn_path.write_text(SAMPLE_PGN, encoding="utf-8")
+        game = Game(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_job_id=pair.id,
+            game_number=1,
+            white_engine="EngineA",
+            black_engine="EngineB",
+            opening_index=0,
+            result="1-0",
+            pgn_path=str(pgn_path),
+            verified=True,
+        )
+        session.add(game)
+        session.commit()
+        gid = game.id
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/games/{gid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+            page.add_init_script(
+                """
+                window.__goCount = 0;
+                window.__workerCount = 0;
+                window.__terminateCount = 0;
+                const __origPost = Worker.prototype.postMessage;
+                Worker.prototype.postMessage = function (msg) {
+                  if (typeof msg === 'string' && msg.startsWith('go ')) {
+                    window.__goCount += 1;
+                  }
+                  return __origPost.apply(this, arguments);
+                };
+                const __origTerminate = Worker.prototype.terminate;
+                Worker.prototype.terminate = function () {
+                  window.__terminateCount += 1;
+                  return __origTerminate.apply(this, arguments);
+                };
+                const __OrigWorker = window.Worker;
+                window.Worker = function (...a) {
+                  window.__workerCount += 1;
+                  return new __OrigWorker(...a);
+                };
+                """
+            )
+            page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
+
+            def bbox():
+                return page.evaluate(
+                    """() => {
+                        const r = document.querySelector('.board-wrap')
+                            .getBoundingClientRect();
+                        return [r.width, r.height];
+                    }"""
+                )
+
+            def close_to(a, b, what):
+                assert all(abs(x - y) <= 1 for x, y in zip(a, b)), (
+                    f"{what}: board width/height moved {a} -> {b}"
+                )
+
+            panel = page.locator(".analysis-panel")
+            panel.wait_for(state="visible", timeout=20000)
+
+            # OFF by default: no worker, no search, explicit start card.
+            assert "Runs locally in this browser" in panel.inner_text()
+            assert page.evaluate("window.__workerCount") == 0, (
+                "no worker may exist while analysis is off"
+            )
+            assert page.evaluate("window.__goCount") == 0
+            b0 = bbox()
+
+            # ON: worker created, exactly one search at default depth 18.
+            page.locator(".analysis-controls button", has_text="Start analysis").click()
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && !el.innerText.startsWith('\u2026');
+                }""",
+                timeout=30000,
+            )
+            assert page.evaluate("window.__workerCount") == 1
+            assert page.evaluate("window.__goCount") == 1
+            close_to(b0, bbox(), "start analysis")
+
+            # Finite depth: the search completes naturally at depth 18 and
+            # keeps its final eval (status ready, panel still shows d18).
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-line');
+                    return el && el.innerText.includes('d18');
+                }""",
+                timeout=120000,
+            )
+            close_to(b0, bbox(), "depth 18 reached")
+            assert page.evaluate("window.__goCount") == 1, (
+                "natural completion must not restart the search"
+            )
+
+            # A longer PV must not resize the board either.
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-pv');
+                    return el && el.innerText.split(' ').length >= 6;
+                }""",
+                timeout=60000,
+            )
+            close_to(b0, bbox(), "PV lengthened")
+
+            # Navigate 5 plies forward and back: board box is untouched.
+            for _ in range(5):
+                page.keyboard.press("ArrowRight")
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && !el.innerText.startsWith('\u2026');
+                }""",
+                timeout=30000,
+            )
+            close_to(b0, bbox(), "5 plies forward")
+            for _ in range(5):
+                page.keyboard.press("ArrowLeft")
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && !el.innerText.startsWith('\u2026');
+                }""",
+                timeout=30000,
+            )
+            close_to(b0, bbox(), "5 plies back")
+
+            # Depth switch: changing the select restarts with the new finite
+            # depth (go depth 22) and completes there — exactly one new go.
+            go_before = page.evaluate("window.__goCount")
+            page.locator(".analysis-depth select").select_option("22")
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-line');
+                    return el && el.innerText.includes('d22');
+                }""",
+                timeout=180000,
+            )
+            assert page.evaluate("window.__goCount") == go_before + 1, (
+                "depth change must start exactly one new search"
+            )
+            close_to(b0, bbox(), "depth 22")
+
+            # Stop analysis terminates the worker; panel returns to OFF.
+            page.locator(".analysis-controls button", has_text="Stop analysis").click()
+            assert page.evaluate("window.__terminateCount") == 1
+            assert "Start analysis" in panel.inner_text()
+
+            # Reload: still OFF (no localStorage persistence).
+            page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
+            panel.wait_for(state="visible", timeout=20000)
+            assert "Start analysis" in panel.inner_text()
+            assert page.evaluate("window.__workerCount") == 0
+
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def test_browser_replay_interactive_stockfish(settings, engine_factory, registered):
     """P4.11 commit 2: any verified game gets interactive browser Stockfish
     analysis without any server diagnostics artifact; the eval updates when
@@ -1428,10 +1672,12 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             assert resp.status == 200
 
             # The browser Stockfish panel must appear without any server
-            # diagnostics artifact, and produce a score within 30s.
+            # diagnostics artifact; analysis is OFF by default (P4.12) so the
+            # user starts it explicitly before any score appears.
             panel = page.locator(".analysis-panel")
             panel.wait_for(state="visible", timeout=20000)
-            assert "Stockfish" in panel.inner_text()
+            assert "Runs locally in this browser" in panel.inner_text()
+            page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
                     const el = document.querySelector('.analysis-score');
@@ -1531,6 +1777,14 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             bad_page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
             err_panel = bad_page.locator(".analysis-panel")
             err_panel.wait_for(state="visible", timeout=20000)
+            bad_page.locator(".analysis-controls button", has_text="Start analysis").click()
+            bad_page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-panel');
+                    return el && el.innerText.includes('unavailable');
+                }""",
+                timeout=20000,
+            )
             assert "unavailable" in err_panel.inner_text().lower(), (
                 f"expected 'Stockfish unavailable', got {err_panel.inner_text()!r}"
             )
@@ -1552,9 +1806,8 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             )
             hung_page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
             hung_panel = hung_page.locator(".analysis-panel")
-            # The panel shows "searching" right away; the init timeout must
-            # flip it to the unavailable state ~10s later.
             hung_panel.wait_for(state="visible", timeout=20000)
+            hung_page.locator(".analysis-controls button", has_text="Start analysis").click()
             hung_page.wait_for_function(
                 """() => {
                     const el = document.querySelector('.analysis-panel');
@@ -1587,6 +1840,7 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             fake_page.goto(f"{base}/games/{gid}", wait_until="domcontentloaded")
             fake_panel = fake_page.locator(".analysis-panel")
             fake_panel.wait_for(state="visible", timeout=20000)
+            fake_page.locator(".analysis-controls button", has_text="Start analysis").click()
             fake_page.wait_for_function(
                 """() => {
                     const el = document.querySelector('.analysis-score');
@@ -1882,9 +2136,11 @@ def test_browser_live_stockfish_eval_bar(
             page.goto(f"{base}/live?tournament_id={tid}", wait_until="domcontentloaded")
 
             # A. The browser Stockfish panel + eval bar appear on the REAL
-            # telemetry FEN and produce a deterministic score.
+            # telemetry FEN and produce a deterministic score.  P4.12:
+            # analysis starts only after the user clicks Start.
             panel = page.locator(".analysis-panel")
             panel.wait_for(state="visible", timeout=30000)
+            page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
                     const el = document.querySelector('.analysis-score');
@@ -2099,6 +2355,11 @@ def test_browser_live_dispose_on_completed(
             page.goto(f"{base}/live?tournament_id={tid1}", wait_until="domcontentloaded")
             panel = page.locator(".analysis-panel")
             panel.wait_for(state="visible", timeout=30000)
+            # P4.12: no worker exists until the user starts analysis.
+            assert page.evaluate("window.__goCount") == 0
+            assert page.evaluate("window.__terminateCount") == 0
+            assert "Start analysis" in panel.inner_text()
+            page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
                     const el = document.querySelector('.analysis-score');
@@ -2133,6 +2394,7 @@ def test_browser_live_dispose_on_completed(
             # produces a score again (no stuck refs from the old session).
             page.goto(f"{base}/live?tournament_id={tid2}", wait_until="domcontentloaded")
             panel.wait_for(state="visible", timeout=30000)
+            page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
                     const el = document.querySelector('.analysis-score');
@@ -2249,9 +2511,10 @@ def test_browser_live_stockfish_failure_isolated(
             page.goto(f"{base}/live?tournament_id={tid}", wait_until="domcontentloaded")
 
             # Worker failure -> visible unavailable state in the Stockfish
-            # panel only.
+            # panel only (analysis is started by the user, then fails).
             err_panel = page.locator(".analysis-panel")
             err_panel.wait_for(state="visible", timeout=20000)
+            page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
                     const el = document.querySelector('.analysis-panel');

@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { useStockfishAnalysis } from "./stockfish/useStockfishAnalysis";
-import { formatScoreOf, shareForUi } from "./eval";
+import { shareForUi } from "./eval";
+import AnalysisPanel, {
+  DEFAULT_ANALYSIS_DEPTH,
+} from "./AnalysisPanel";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -103,15 +106,19 @@ export default function LiveApp({ tournamentId, basePath }) {
   // P4.11 commit 3: the SAME browser Stockfish core as the Replay page.
   // Only the REAL telemetry current_fen enables it (opening-fen fallback or
   // missing telemetry fails closed).  Called unconditionally — the hook must
-  // never move below an early return.
+  // never move below an early return.  P4.12: OFF by default, no worker
+  // until the user starts analysis.
+  const [analysisEnabled, setAnalysisEnabled] = useState(false);
+  const [analysisDepth, setAnalysisDepth] = useState(DEFAULT_ANALYSIS_DEPTH);
   const liveFen = payload?.current_fen || null;
-  const browserEnabled = phase === "live" && Boolean(liveFen);
+  const browserEnabled =
+    phase === "live" && Boolean(liveFen) && analysisEnabled;
   const browser = useStockfishAnalysis({
     fen: liveFen,
     enabled: browserEnabled,
     basePath,
+    depth: analysisDepth,
   });
-  const [boardSize, setBoardSize] = useState(480);
   const replayRef = useRef(null);
   // Clock countdown: anchored at the moment the last payload arrived; only
   // the side to move keeps ticking between 1.5s polls.
@@ -129,22 +136,6 @@ export default function LiveApp({ tournamentId, basePath }) {
   useEffect(() => {
     if (phase === "live") setReceivedAt(Date.now());
   }, [phase, payload]);
-
-  // Hooks must be called unconditionally (before any early return).  Size the
-  // board to fit the available height; no-op while there is no board.
-  useEffect(() => {
-    const el = replayRef.current;
-    if (!el) return undefined;
-    const compute = () => {
-      const w = el.clientWidth;
-      const h = el.clientHeight;
-      setBoardSize(Math.max(220, Math.min((w - 20) / 2 - 10, h - 170)));
-    };
-    compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [phase]);
 
   if (phase === "loading") {
     return <div className="demo-message">Connecting to live status…</div>;
@@ -255,11 +246,10 @@ export default function LiveApp({ tournamentId, basePath }) {
             <span className="live-clock">{clockOf(black, hasTelemetry && !activeIsWhite)}</span>
           )}
         </div>
-        <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
-          <Chessboard options={{ position: fen, allowDragging: false }} />
+        <div className="board-stage">
           {/* P4.11 commit 3: the eval bar reflects ONLY the browser
               Stockfish evaluation — never a match engine's self-eval. */}
-          {hasBrowserScore && (
+          {hasBrowserScore && analysisEnabled && (
             <div className="eval-bar" aria-label="Evaluation">
               <div
                 className="eval-bar-white"
@@ -267,6 +257,9 @@ export default function LiveApp({ tournamentId, basePath }) {
               />
             </div>
           )}
+          <div className="board-wrap" data-fen={fen}>
+            <Chessboard options={{ position: fen, allowDragging: false }} />
+          </div>
         </div>
         <div className="player-card bottom">
           <span className="player-name">{white ? white.label : "—"}</span>
@@ -281,42 +274,26 @@ export default function LiveApp({ tournamentId, basePath }) {
       </div>
       <div className="replay-side-col">
         <Badges data={payload} />
-        {browserEnabled && (
-          <div className="analysis-panel">
-            {browser.status === "error" ? (
-              <>
-                <div className="analysis-score">
-                  Stockfish unavailable
-                  <span className="analysis-engine">
-                    Stockfish · browser
-                  </span>
-                </div>
-                <div className="analysis-line">engine failed to start</div>
-              </>
-            ) : (
-              <>
-                <div className="analysis-score">
-                  {formatScoreOf(browser) ?? "…"}
-                  <span className="analysis-engine">
-                    {browser.version
-                      ? `Stockfish ${browser.version.split(" ")[1]} · browser`
-                      : "Stockfish · browser"}
-                  </span>
-                </div>
-                <div className="analysis-line">
-                  {browser.depth != null && <>d{browser.depth} </>}
-                  {browser.nps != null && (
-                    <>· {(browser.nps / 1e6).toFixed(1)}M </>
-                  )}
-                  {browser.status === "searching" && <>· searching…</>}
-                </div>
-                {browser.pv && browser.pv.length > 0 && (
-                  <div className="analysis-pv">PV: {browser.pv.join(" ")}</div>
-                )}
-              </>
+        {phase === "live" && payload.candidate_wins != null && (
+          <div className="live-meta">
+            Verified W-D-L {payload.candidate_wins}-{payload.draws}-
+            {payload.candidate_losses} · Δ Elo (A−B){" "}
+            {eloDeltaLabel(
+              payload.candidate_wins,
+              payload.draws,
+              payload.candidate_losses
             )}
           </div>
         )}
+        <AnalysisPanel
+          browser={browser}
+          fen={liveFen}
+          enabled={browserEnabled}
+          depth={analysisDepth}
+          onDepthChange={setAnalysisDepth}
+          onStart={() => setAnalysisEnabled(true)}
+          onStop={() => setAnalysisEnabled(false)}
+        />
         {hasTelemetry && (
           <>
             <div className="live-meta">

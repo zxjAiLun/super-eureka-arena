@@ -3,6 +3,10 @@ import { Chessboard } from "react-chessboard";
 import { Chess } from "chess.js";
 import { useStockfishAnalysis } from "./stockfish/useStockfishAnalysis";
 import { formatScoreOf, shareForUi, shareOf } from "./eval";
+import { uciPvToSan } from "./uci";
+import AnalysisPanel, {
+  DEFAULT_ANALYSIS_DEPTH,
+} from "./AnalysisPanel";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -108,29 +112,14 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   const [ply, setPly] = useState(0);
   const [playing, setPlaying] = useState(false);
   const replayRef = useRef(null);
-  const [boardSize, setBoardSize] = useState(480);
+  // P4.12: browser analysis is OFF by default; no worker exists until the
+  // user starts it, and no localStorage ever re-enables it.
+  const [analysisEnabled, setAnalysisEnabled] = useState(false);
+  const [analysisDepth, setAnalysisDepth] = useState(DEFAULT_ANALYSIS_DEPTH);
 
   useEffect(() => {
     setPly(0);
     setPlaying(false);
-  }, [status]);
-
-  // Size the board to fit the available height (and the left half of the
-  // width) so the replay never needs the page to scroll.
-  useEffect(() => {
-    if (status !== "ready") return undefined;
-    const el = replayRef.current;
-    if (!el) return undefined;
-    const compute = () => {
-      const w = el.clientWidth;
-      const h = el.clientHeight;
-      const size = Math.max(220, Math.min((w - 20) / 2 - 10, h - 170));
-      setBoardSize(size);
-    };
-    compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(el);
-    return () => ro.disconnect();
   }, [status]);
 
   const fen = useMemo(() => {
@@ -149,10 +138,12 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   // P4.11 commit 2: interactive browser Stockfish — analyzes the current
   // position in the browser (no server artifact required).  The server
   // diagnostics remain only a whole-game source for ?!/??/biggest-swing.
+  // P4.12: OFF by default; the worker only exists while analysisEnabled.
   const browser = useStockfishAnalysis({
     fen,
-    enabled: status === "ready",
+    enabled: status === "ready" && analysisEnabled,
     basePath,
+    depth: analysisDepth,
   });
 
   // Autoplay: advance one ply on a timer; stop at the last move.
@@ -353,27 +344,11 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
   // Analysis is aligned by ply: positions[ply] covers the current position.
   const pos = diagnostics?.positions?.[ply] ?? null;
 
-  const pvSans = (p) => {
-    if (!p?.pv?.length) return [];
-    const c = new Chess(p.fen);
-    const out = [];
-    for (const uci of p.pv) {
-      try {
-        const m = c.move({ from: uci.slice(0, 2), to: uci.slice(2, 4), promotion: uci[4] });
-        out.push(m.san);
-      } catch {
-        break;
-      }
-    }
-    return out;
-  };
   const scoreText = formatScoreOf(pos);
-  const pvText = pos ? pvSans(pos) : [];
+  const pvText = pos ? uciPvToSan(pos.fen, pos.pv) : [];
   // The eval bar prefers the live browser Stockfish result.
   const hasBrowserScore = browser.score_cp != null || browser.mate != null;
   const barPos = hasBrowserScore ? browser : pos;
-  const browserScoreText = formatScoreOf(browser);
-  const browserPv = browser.pv ? pvSans({ fen, pv: browser.pv }) : [];
 
   return (
     <div className="replay" ref={replayRef} onWheel={onWheel}>
@@ -384,8 +359,7 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           <span className="color-dot black" />
           <span className="player-name">{game.black_engine}</span>
         </div>
-        <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
-          <Chessboard options={{ position: fen, allowDragging: false }} />
+        <div className="board-stage">
           {barPos && (
             <div className="eval-bar" aria-label="Evaluation">
               <div
@@ -394,6 +368,9 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
               />
             </div>
           )}
+          <div className="board-wrap" data-fen={fen}>
+            <Chessboard options={{ position: fen, allowDragging: false }} />
+          </div>
         </div>
         <div className="player-card bottom">
           <span className="player-name">{game.white_engine}</span>
@@ -456,36 +433,15 @@ export default function App({ gameId, tournamentId, basePath, pairIndex }) {
           </span>
         </div>
 
-        {browser.status === "error" && (
-          <div className="analysis-panel">
-            <div className="analysis-score">
-              Stockfish unavailable
-              <span className="analysis-engine">Stockfish · browser</span>
-            </div>
-            <div className="analysis-line">engine failed to start</div>
-          </div>
-        )}
-
-        {(hasBrowserScore || browser.status === "searching") && (
-          <div className="analysis-panel">
-            <div className="analysis-score">
-              {browserScoreText ?? "…"}
-              <span className="analysis-engine">
-                {browser.version
-                  ? `Stockfish ${browser.version.split(" ")[1]} · browser`
-                  : "Stockfish · browser"}
-              </span>
-            </div>
-            <div className="analysis-line">
-              {browser.depth != null && <>d{browser.depth} </>}
-              {browser.nps != null && <>· {(browser.nps / 1e6).toFixed(1)}M </>}
-              {browser.status === "searching" && <>· searching…</>}
-            </div>
-            {browserPv.length > 0 && (
-              <div className="analysis-pv">PV: {browserPv.join(" ")}</div>
-            )}
-          </div>
-        )}
+        <AnalysisPanel
+          browser={browser}
+          fen={fen}
+          enabled={analysisEnabled}
+          depth={analysisDepth}
+          onDepthChange={setAnalysisDepth}
+          onStart={() => setAnalysisEnabled(true)}
+          onStop={() => setAnalysisEnabled(false)}
+        />
 
         {pos && (
           <div className="diagnostics-panel">
