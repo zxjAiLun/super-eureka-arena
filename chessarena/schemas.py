@@ -208,6 +208,9 @@ class PublicMatchOut(BaseModel):
     candidate_losses: int
     draws: int
     score_percent: Optional[float] = None
+    # P4.11 commit 4: Engine A vs Engine B performance delta derived from the
+    # match score (NOT a P4.8 Arena Elo mutation).  Clamped to +/-800.
+    elo_delta: Optional[int] = None
     finished_at: Optional[datetime] = None
     engine_a_label: str
     engine_b_label: str

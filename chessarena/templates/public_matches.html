@@ -2,7 +2,7 @@
 {% block title %}ChessArena — Matches{% endblock %}
 {% block content %}
 <h1>Matches</h1>
-<p class="muted">All completed matches, newest first.</p>
+<p class="muted">All completed matches, newest first. W-D-L and Δ Elo are from Engine A (candidate) perspective.</p>
 
 {% if matches %}
 <table class="match-table">
@@ -11,7 +11,8 @@
       <th>Match</th>
       <th>Time control</th>
       <th>Engines</th>
-      <th>Score</th>
+      <th>W-D-L</th>
+      <th>Δ Elo (A−B)</th>
       <th>Finished</th>
     </tr>
   </thead>
@@ -19,10 +20,10 @@
     {% for m in matches %}
     <tr>
       <td><a href="{{ settings.base_path }}/matches/{{ m.id }}">{{ m.name }}</a></td>
-      <td>{{ m.time_control }}</td>
+      <td>{{ m.time_control|tc_label }}</td>
       <td>{{ m.engine_a_label }} vs {{ m.engine_b_label }}</td>
-      <td>{{ m.candidate_wins }}W / {{ m.candidate_losses }}L / {{ m.draws }}D
-        {% if m.score_percent is not none %}({{ m.score_percent }}%){% endif %}</td>
+      <td>{{ m.candidate_wins }}-{{ m.draws }}-{{ m.candidate_losses }}</td>
+      <td>{{ m.elo_delta|elo_delta_text }}</td>
       <td>{{ m.finished_at.strftime("%Y-%m-%d %H:%M") if m.finished_at else "" }}</td>
     </tr>
     {% endfor %}

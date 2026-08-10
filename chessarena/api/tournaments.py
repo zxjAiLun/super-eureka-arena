@@ -761,9 +761,20 @@ def admin_dashboard(request: Request, session: Session = Depends(get_db)):
     if worker is not None and worker.tournament_id:
         active = _get_tournament_or_404(session, worker.tournament_id)
 
+    from ..services.display import match_elo_delta
+
+    if active is not None:
+        active.elo_delta = match_elo_delta(
+            active.candidate_wins, active.draws, active.candidate_losses
+        )
+
     recent = (
         session.query(Tournament).order_by(Tournament.created_at.desc()).limit(20).all()
     )
+    # P4.11 commit 4: attach the W-D-L / Δ Elo display values to each row so
+    # the dashboard renders them with the same helpers as the public pages.
+    for t in recent:
+        t.elo_delta = match_elo_delta(t.candidate_wins, t.draws, t.candidate_losses)
     # _tournament_status.html is included whenever a match is active and
     # requires the full tournament/pairs/score_percent contract (it uses
     # {{ tournament.* }} and iterates {{ pairs }}), so pass them explicitly.
@@ -1035,6 +1046,15 @@ def admin_tournament_detail(
 
     rated_elo = engine_rating(session, tournament)
 
+    from ..services.display import match_elo_delta
+
+    elo_delta = match_elo_delta(
+        tournament.candidate_wins, tournament.draws, tournament.candidate_losses
+    )
+    # _tournament_status.html reads the attribute directly (shared with the
+    # dashboard and the HTMX fragment routes), so attach it to the object.
+    tournament.elo_delta = elo_delta
+
     # P4.10 bulk-analyze pending counts (verified games not ready/queued),
     # shared with the bulk route so the buttons and the POST never drift.
     bulk_pending = _bulk_pending_counts(games)
@@ -1049,6 +1069,7 @@ def admin_tournament_detail(
             "games": games,
             "events": events,
             "score_percent": _score_percent(tournament),
+            "elo_delta": elo_delta,
             "opening_plies": opening_plies,
             "run_again": run_again,
             "engine_a_label": engine_a_label,
@@ -1319,26 +1340,12 @@ async def admin_tournament_rating_toggle(
 
 
 @admin_router.get("/admin/ratings", response_class=HTMLResponse)
-def admin_ratings(
-    request: Request,
-    tc: str = "blitz_3_2",
-    session: Session = Depends(get_db),
-):
-    """Arena Elo leaderboard, recomputed from surviving rated history (P4.8)."""
-    from ..services.ratings import compute_ratings
-
-    all_ratings = compute_ratings(session)
-    pools = {key: val for key, val in TIME_CONTROLS.items()}
-    selected = tc if tc in pools else "blitz_3_2"
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "ratings.html",
-        {
-            "pools": pools,
-            "selected_tc": selected,
-            "ratings": all_ratings.get(selected, {"engines": [], "anchors": []}),
-            "settings": request.app.state.settings,
-        },
+def admin_ratings(request: Request):
+    """P4.11 commit 4: the leaderboard moved to the public /ratings/ page;
+    the old admin URL redirects so no link or bookmark breaks."""
+    return RedirectResponse(
+        url=f"{request.app.state.settings.base_path}/ratings/",
+        status_code=303,
     )
 
 
@@ -1348,8 +1355,13 @@ def admin_tournament_status_fragment(
     request: Request, tournament_id: str, session: Session = Depends(get_db)
 ):
     """HTMX fragment auto-refreshed every 5 seconds (section 17.1)."""
+    from ..services.display import match_elo_delta
+
     templates = request.app.state.templates
     tournament = _get_tournament_or_404(session, tournament_id)
+    tournament.elo_delta = match_elo_delta(
+        tournament.candidate_wins, tournament.draws, tournament.candidate_losses
+    )
     pairs = sorted(tournament.pair_jobs, key=lambda p: p.pair_index)
     return templates.TemplateResponse(
         request,

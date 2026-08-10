@@ -4,7 +4,7 @@
 <h1>Dashboard</h1>
 
 <p>
-  <a class="action-link" href="{{ settings.base_path }}/admin/ratings">Arena Elo</a>
+  <a class="action-link" href="{{ settings.base_path }}/ratings/">Arena Elo</a>
 </p>
 
 <section class="panel" id="worker-panel"
@@ -28,7 +28,7 @@
   <thead>
     <tr>
       <th>Name</th><th>Status</th><th>TC</th><th>Pairs</th>
-      <th>W/L/D</th><th>Score</th><th>Created</th>
+      <th>W-D-L</th><th>Δ Elo (A−B)</th><th>Created</th>
     </tr>
   </thead>
   <tbody>
@@ -36,13 +36,10 @@
     <tr>
       <td><a href="{{ settings.base_path }}/admin/tournaments/{{ t.id }}">{{ t.name }}</a></td>
       <td><span class="status status-{{ t.status|lower }}">{{ t.status }}</span></td>
-      <td>{{ t.time_control }}</td>
+      <td>{{ t.time_control|tc_label }}</td>
       <td>{{ t.completed_pairs }}/{{ t.requested_pairs }}</td>
-      <td>{{ t.candidate_wins }}/{{ t.candidate_losses }}/{{ t.draws }}</td>
-      <td>
-        {% set played = t.candidate_wins + t.candidate_losses + t.draws %}
-        {{ ((t.candidate_wins + 0.5 * t.draws) / played * 100)|round(1) if played else "—" }}
-      </td>
+      <td>{{ t.candidate_wins }}-{{ t.draws }}-{{ t.candidate_losses }}</td>
+      <td>{{ t.elo_delta|elo_delta_text }}</td>
       <td>{{ t.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
     </tr>
   {% endfor %}

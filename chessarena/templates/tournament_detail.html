@@ -14,11 +14,11 @@
   <h3>Result</h3>
   <dl class="result-grid">
     <dt>Matchup</dt><dd>{{ engine_a_label }} vs {{ engine_b_label }}</dd>
-    <dt>W / L / D</dt><dd>{{ tournament.candidate_wins }} / {{ tournament.candidate_losses }} / {{ tournament.draws }}</dd>
-    <dt>Score</dt><dd>{{ score_percent if score_percent is not none else "—" }}%</dd>
+    <dt>W-D-L</dt><dd>{{ tournament.candidate_wins }}-{{ tournament.draws }}-{{ tournament.candidate_losses }}</dd>
+    <dt>Δ Elo (A−B)</dt><dd>{{ elo_delta|elo_delta_text }}</dd>
     <dt>Games</dt><dd>{{ tournament.candidate_wins + tournament.candidate_losses + tournament.draws }}</dd>
     <dt>Pairs</dt><dd>{{ tournament.completed_pairs }} / {{ tournament.requested_pairs }}</dd>
-    <dt>Time control</dt><dd>{{ tournament.time_control }}</dd>
+    <dt>Time control</dt><dd>{{ tournament.time_control|tc_label }}</dd>
     <dt>Opening</dt><dd>{{ tournament.opening_set_id }}{% if opening_plies is not none %} &middot; {{ opening_plies }} ply{% endif %}</dd>
   </dl>
   <p class="actions">
@@ -92,7 +92,7 @@
   <h3>Arena Elo</h3>
   {% if rated_elo %}
     <p>
-      Current Arena Elo — {{ tournament.time_control }} pool:
+      Current Arena Elo — {{ tournament.time_control|tc_label }} pool:
       <strong>{{ rated_elo.rating }}{% if rated_elo.upper_bound %}+{% elif rated_elo.lower_bound %}-{% endif %}</strong>
       {% if rated_elo.provisional %}<span class="status status-pending">provisional</span>{% endif %}
       ({{ rated_elo.games }} games)
@@ -109,7 +109,7 @@
       {% if tournament.arena_elo_enabled %}Exclude from Arena Elo{% else %}Include in Arena Elo{% endif %}
     </button>
   </form>
-  <a class="action-link" href="{{ settings.base_path }}/admin/ratings">Arena Elo leaderboard</a>
+  <a class="action-link" href="{{ settings.base_path }}/ratings/">Arena Elo leaderboard</a>
   {% endif %}
 </section>
 
@@ -119,7 +119,7 @@
     <dt>Engine A</dt><dd>{{ engine_a_label }} <span class="muted">({{ tournament.engine_a_build_id }} / {{ tournament.engine_a_profile }})</span></dd>
     <dt>Engine B</dt><dd>{{ engine_b_label }} <span class="muted">({{ tournament.engine_b_build_id }} / {{ tournament.engine_b_profile }})</span></dd>
     <dt>Opening set</dt><dd>{{ tournament.opening_set_id }}</dd>
-    <dt>Time control</dt><dd>{{ tournament.time_control }} (Hash 32 MB, concurrency 1)</dd>
+    <dt>Time control</dt><dd>{{ tournament.time_control|tc_label }} (Hash 32 MB, concurrency 1)</dd>
     <dt>Pairs</dt><dd>{{ tournament.completed_pairs }} / {{ tournament.requested_pairs }}</dd>
     <dt>Created</dt><dd>{{ tournament.created_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</dd>
     {% if tournament.started_at %}<dt>Started</dt><dd>{{ tournament.started_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</dd>{% endif %}

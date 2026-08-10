@@ -5,6 +5,22 @@ import { formatScoreOf, shareForUi } from "./eval";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
+// P4.11 commit 4: match-score derived performance delta (Engine A vs B),
+// same formula and +/-800 clamp as the server display helper.
+function matchEloDelta(wins, draws, losses) {
+  const played = wins + draws + losses;
+  if (!played) return null;
+  const s = (wins + 0.5 * draws) / played;
+  if (s >= 1) return 800;
+  if (s <= 0) return -800;
+  return Math.round(400 * Math.log10(s / (1 - s)));
+}
+
+function eloDeltaText(delta) {
+  if (delta == null) return "—";
+  return delta > 0 ? `+${delta}` : `${delta}`;
+}
+
 const TC_LABELS = {
   bullet_1_0: "1+0",
   blitz_3_2: "3+2",
@@ -143,7 +159,13 @@ export default function LiveApp({ tournamentId, basePath }) {
         <p>
           <strong>{payload.name}</strong> finished.
           {payload.candidate_wins != null &&
-            ` Score: ${payload.candidate_wins}/${payload.candidate_losses}/${payload.draws} (W/L/D).`}
+            ` Final: ${payload.candidate_wins}-${payload.draws}-${payload.candidate_losses} W-D-L · Δ Elo (A−B) ${eloDeltaText(
+              matchEloDelta(
+                payload.candidate_wins,
+                payload.draws,
+                payload.candidate_losses
+              )
+            )}.`}
         </p>
         <p>
           <a href={payload.match_url} className="action-link">

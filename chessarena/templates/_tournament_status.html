@@ -3,14 +3,12 @@
   <p>
     <a href="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}"><strong>{{ tournament.name }}</strong></a>
     · <span class="status status-{{ tournament.status|lower }}">{{ tournament.status }}</span>
-    · {{ tournament.time_control }}
+    · {{ tournament.time_control|tc_label }}
   </p>
   <p>
     Progress: {{ tournament.completed_pairs }} / {{ tournament.requested_pairs }} pairs
-    · W/L/D {{ tournament.candidate_wins }}/{{ tournament.candidate_losses }}/{{ tournament.draws }}
-    · Score
-    {% set played = tournament.candidate_wins + tournament.candidate_losses + tournament.draws %}
-    <strong>{{ ((tournament.candidate_wins + 0.5 * tournament.draws) / played * 100)|round(1) if played else "—" }}%</strong>
+    · W-D-L {{ tournament.candidate_wins }}-{{ tournament.draws }}-{{ tournament.candidate_losses }}
+    · Δ Elo (A−B) {{ tournament.elo_delta|elo_delta_text }}
   </p>
   <p class="muted">Current pair:
     {% set ns = namespace(current=None) %}

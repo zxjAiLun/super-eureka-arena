@@ -9,11 +9,8 @@
 </head>
 <body>
   <header>
-    <nav>
-      <a href="{{ settings.base_path }}/admin/">Dashboard</a>
-      <a href="{{ settings.base_path }}/admin/tournaments/new">New match</a>
-      <span class="brand">ChessArena v1</span>
-    </nav>
+    {% set admin = True %}
+    {% include "_nav.html" %}
   </header>
   <main>
     {% block content %}{% endblock %}

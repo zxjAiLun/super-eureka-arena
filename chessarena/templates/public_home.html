@@ -1,10 +1,45 @@
 {% extends "public_base.html" %}
-{% block title %}ChessArena — Recent matches{% endblock %}
+{% block title %}ChessArena — Arena Overview{% endblock %}
 {% block content %}
-<h1>ChessArena</h1>
-<p class="muted">Automated chess match arena. Browse recent completed matches and replay the games.</p>
+<h1>Arena Overview</h1>
+<p class="muted">Automated chess match arena: what is live right now, the latest result, and recent matches.</p>
 
-<p><a class="action-link" href="{{ settings.base_path }}/live">&#9654; Live — watch the match currently running</a></p>
+<section class="panel">
+  <h2>Live now</h2>
+  {% if live %}
+    <p>
+      <strong>{{ live.name }}</strong> · {{ live.time_control|tc_label }}
+      {% if live_pair_index is not none %}
+        · Pair {{ live_pair_index + 1 }}/{{ live.requested_pairs }}
+      {% endif %}
+    </p>
+    <p>
+      <a class="action-link" href="{{ settings.base_path }}/live?tournament_id={{ live.id }}">
+        &#9654; Open Live
+      </a>
+    </p>
+  {% else %}
+    <p class="muted">No match currently live.</p>
+  {% endif %}
+</section>
+
+{% if latest %}
+<section class="panel">
+  <h2>Latest result</h2>
+  <p>
+    <strong>{{ latest.engine_a_label }}</strong> vs
+    <strong>{{ latest.engine_b_label }}</strong>
+    · {{ latest.time_control|tc_label }}
+  </p>
+  <p>
+    W-D-L: {{ latest.candidate_wins }}-{{ latest.draws }}-{{ latest.candidate_losses }}
+    · Δ Elo (A−B): {{ latest.elo_delta|elo_delta_text }}
+  </p>
+  <p>
+    <a class="action-link" href="{{ settings.base_path }}/matches/{{ latest.id }}">Open match</a>
+  </p>
+</section>
+{% endif %}
 
 <h2>Recent matches</h2>
 {% if matches %}
@@ -14,7 +49,8 @@
       <th>Match</th>
       <th>Time control</th>
       <th>Engines</th>
-      <th>Score</th>
+      <th>W-D-L</th>
+      <th>Δ Elo (A−B)</th>
       <th>Finished</th>
     </tr>
   </thead>
@@ -22,10 +58,10 @@
     {% for m in matches %}
     <tr>
       <td><a href="{{ settings.base_path }}/matches/{{ m.id }}">{{ m.name }}</a></td>
-      <td>{{ m.time_control }}</td>
+      <td>{{ m.time_control|tc_label }}</td>
       <td>{{ m.engine_a_label }} vs {{ m.engine_b_label }}</td>
-      <td>{{ m.candidate_wins }}W / {{ m.candidate_losses }}L / {{ m.draws }}D
-        {% if m.score_percent is not none %}({{ m.score_percent }}%){% endif %}</td>
+      <td>{{ m.candidate_wins }}-{{ m.draws }}-{{ m.candidate_losses }}</td>
+      <td>{{ m.elo_delta|elo_delta_text }}</td>
       <td>{{ m.finished_at.strftime("%Y-%m-%d %H:%M") if m.finished_at else "" }}</td>
     </tr>
     {% endfor %}
@@ -34,4 +70,9 @@
 {% else %}
 <p class="muted">No completed matches yet.</p>
 {% endif %}
+
+<p>
+  <a class="action-link" href="{{ settings.base_path }}/matches/">View all matches &rarr;</a>
+  <a class="action-link" href="{{ settings.base_path }}/ratings/">View ratings &rarr;</a>
+</p>
 {% endblock %}

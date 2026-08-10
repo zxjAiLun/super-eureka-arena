@@ -20,10 +20,25 @@ header {
   color: #fff;
   padding: 0.6rem 1rem;
 }
-header nav { display: flex; gap: 1.2rem; align-items: baseline; }
+header nav, .topnav {
+  display: flex;
+  gap: 1.2rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
 header a { color: #cfd8e3; text-decoration: none; }
 header a:hover { color: #fff; }
-header .brand { margin-left: auto; font-weight: 600; }
+header .topnav .brand, .topnav .brand { font-weight: 600; color: #fff; }
+/* Explicit spacer (P4.11 commit 4): the brand must stay left; the spacer,
+   not the brand, absorbs the remaining width before the admin actions. */
+.nav-spacer { flex: 1 1 auto; }
+
+/* P4.11 commit 4: public match detail headline stats (W-D-L | Δ Elo). */
+.match-stats {
+  display: flex;
+  gap: 2.5rem;
+  margin: 0.4rem 0 0.8rem;
+}
 main { max-width: 1080px; margin: 1rem auto; padding: 0 1rem; }
 h1 { font-size: 1.4rem; }
 h2 { font-size: 1.15rem; margin-top: 1.6rem; }

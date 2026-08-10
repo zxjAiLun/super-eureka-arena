@@ -4,11 +4,12 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ChessArena — Live</title>
+  <link rel="stylesheet" href="{{ settings.base_path }}/static/style.css">
   <link rel="stylesheet" href="{{ settings.base_path }}/static/replay-app/assets/index.css">
   <style>
     html, body { margin: 0; height: 100%; }
-    body { overflow: hidden; background: var(--demo-bg, #161b22); }
-    .replay-page { height: 100dvh; display: flex; flex-direction: column; }
+    body { overflow: hidden; background: var(--demo-bg, #161b22); display: flex; flex-direction: column; }
+    .replay-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
     .replay-header {
       flex: 0 0 auto; display: flex; align-items: center; gap: 1rem;
       padding: 0.6rem 1rem; background: var(--demo-card, #1c222b);
@@ -22,6 +23,9 @@
   </style>
 </head>
 <body>
+  <header>
+    {% include "_nav.html" %}
+  </header>
   <div class="replay-page">
     <header class="replay-header">
       <a href="{{ settings.base_path }}/matches/">&larr; Back to matches</a>

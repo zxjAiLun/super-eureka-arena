@@ -1,7 +1,7 @@
-{% extends "base.html" %}
-{% block title %}ChessArena · Arena Elo{% endblock %}
+{% extends "public_base.html" %}
+{% block title %}ChessArena — Ratings{% endblock %}
 {% block content %}
-<h1>Arena Elo</h1>
+<h1>Arena Ratings</h1>
 <p class="muted">
   Anchor-calibrated ratings: Stockfish Limited (UCI_Elo) is a fixed anchor,
   engine ratings are recomputed from rated match history. Not FIDE/CCRL/human
@@ -9,19 +9,19 @@
 </p>
 
 <div class="tabs">
-  {% for key, tc in pools.items() %}
+  {% for key, label in pools.items() %}
     <a class="tab {% if key == selected_tc %}active{% endif %}"
-       href="{{ settings.base_path }}/admin/ratings?tc={{ key }}">{{ tc.label }}</a>
+       href="{{ settings.base_path }}/ratings/?tc={{ key }}">{{ label }}</a>
   {% endfor %}
 </div>
 
-{% if ratings.engines %}
+{% if engines %}
 <table class="match-table">
   <thead>
     <tr><th>Engine</th><th>Arena Elo</th><th>Games</th></tr>
   </thead>
   <tbody>
-    {% for e in ratings.engines %}
+    {% for e in engines %}
     <tr>
       <td>{{ e.display_name }}</td>
       <td>
@@ -43,7 +43,7 @@
 <table class="match-table">
   <thead><tr><th>Anchor</th><th>Arena Elo</th></tr></thead>
   <tbody>
-    {% for a in ratings.anchors %}
+    {% for a in anchors %}
     <tr><td>{{ a.display_name }}</td><td>{{ a.rating }} (fixed)</td></tr>
     {% endfor %}
   </tbody>

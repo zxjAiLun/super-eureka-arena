@@ -86,7 +86,9 @@ def test_completed_match_summary_and_run_again(
     r = app_client.get(f"/chessarena/admin/tournaments/{tid}")
     assert r.status_code == 200
     assert "Result" in r.text
-    assert "4 / 2 / 2" in r.text
+    # P4.11 commit 4: W-D-L (wins-draws-losses), never W / L / D.
+    assert "4-2-2" in r.text
+    assert "4 / 2 / 2" not in r.text
     assert "Replay games" in r.text
     assert "Run again" in r.text
     assert "Delete match" in r.text

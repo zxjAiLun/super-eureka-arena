@@ -63,6 +63,8 @@ def _score_percent(t: Tournament) -> float | None:
 
 
 def _public_match(session: Session, t: Tournament) -> PublicMatchOut:
+    from ..services.display import match_elo_delta
+
     snap = t.config_snapshot or {}
     return PublicMatchOut(
         id=t.id,
@@ -75,6 +77,9 @@ def _public_match(session: Session, t: Tournament) -> PublicMatchOut:
         candidate_losses=t.candidate_losses,
         draws=t.draws,
         score_percent=_score_percent(t),
+        elo_delta=match_elo_delta(
+            t.candidate_wins, t.draws, t.candidate_losses
+        ),
         finished_at=t.finished_at,
         engine_a_label=tournament_engine_label(
             session, snap.get("engine_a"),
@@ -427,11 +432,32 @@ def _recent_matches(session: Session, limit: int = 12):
 
 @pages_router.get("/")
 def public_home(request: Request, session: Session = Depends(get_db)):
+    """Arena Overview (P4.11 commit 4): what is happening now, the latest
+    completed result, and a compact recent list — NOT a copy of the full
+    matches table (that lives on /matches/)."""
+    live = (
+        session.query(Tournament)
+        .filter(Tournament.status.in_([QUEUED, RUNNING, PAUSING]))
+        .order_by(Tournament.started_at.desc())
+        .first()
+    )
+    live_pair = _current_pair(live) if live is not None else None
+    latest = (
+        session.query(Tournament)
+        .filter(Tournament.status == COMPLETED)
+        .order_by(Tournament.finished_at.desc())
+        .first()
+    )
+    latest_match = _public_match(session, latest) if latest is not None else None
+    recent = _recent_matches(session, limit=5)
     return _render(
         request,
         "public_home.html",
         settings=request.app.state.settings,
-        matches=_recent_matches(session, limit=12),
+        live=live,
+        live_pair_index=live_pair.pair_index if live_pair else None,
+        latest=latest_match,
+        matches=recent,
     )
 
 
@@ -467,6 +493,46 @@ def public_matches(request: Request, session: Session = Depends(get_db)):
         "public_matches.html",
         settings=request.app.state.settings,
         matches=_recent_matches(session, limit=200),
+    )
+
+
+@pages_router.get("/ratings/")
+def public_ratings(
+    request: Request,
+    tc: str = "blitz_3_2",
+    session: Session = Depends(get_db),
+):
+    """Public Arena Elo leaderboard (P4.11 commit 4), recomputed live from
+    rated match history via the same compute_ratings service the admin used.
+    Only whitelisted display fields reach the template — never fingerprints,
+    build ids, SHAs or server paths."""
+    from ..config import TIME_CONTROLS
+    from ..services.display import tc_label
+    from ..services.ratings import compute_ratings
+
+    all_ratings = compute_ratings(session)
+    pools = {key: tc_label(key) for key in TIME_CONTROLS}
+    selected = tc if tc in pools else "blitz_3_2"
+    rows = all_ratings.get(selected, {"engines": [], "anchors": []})
+    engines = [
+        {
+            "display_name": e["display_name"],
+            "rating": e["rating"],
+            "games": e["games"],
+            "provisional": e["provisional"],
+            "lower_bound": e["lower_bound"],
+            "upper_bound": e["upper_bound"],
+        }
+        for e in rows["engines"]
+    ]
+    return _render(
+        request,
+        "public_ratings.html",
+        settings=request.app.state.settings,
+        pools=pools,
+        selected_tc=selected,
+        engines=engines,
+        anchors=rows["anchors"],
     )
 
 

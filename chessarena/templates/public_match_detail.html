@@ -3,13 +3,25 @@
 {% block content %}
 <p><a href="{{ settings.base_path }}/matches/">&larr; All matches</a></p>
 <h1>{{ match.name }}</h1>
+<p class="muted">
+  {{ match.engine_a_label }} vs {{ match.engine_b_label }}
+  · {{ match.time_control|tc_label }}
+</p>
+<div class="match-stats">
+  <div>
+    <span class="muted">W-D-L</span><br>
+    <strong>{{ match.candidate_wins }}-{{ match.draws }}-{{ match.candidate_losses }}</strong>
+  </div>
+  <div>
+    <span class="muted">Δ Elo (A−B)</span><br>
+    <strong>{{ match.elo_delta|elo_delta_text }}</strong>
+  </div>
+</div>
 <table class="match-meta">
   <tbody>
-    <tr><th>Time control</th><td>{{ match.time_control }}</td></tr>
+    <tr><th>Time control</th><td>{{ match.time_control|tc_label }}</td></tr>
     <tr><th>Engine A</th><td>{{ match.engine_a_label }}</td></tr>
     <tr><th>Engine B</th><td>{{ match.engine_b_label }}</td></tr>
-    <tr><th>Score</th><td>{{ match.candidate_wins }}W / {{ match.candidate_losses }}L / {{ match.draws }}D
-      {% if match.score_percent is not none %}({{ match.score_percent }}%){% endif %}</td></tr>
     <tr><th>Pairs</th><td>{{ match.completed_pairs }} / {{ match.requested_pairs }}</td></tr>
     <tr><th>Opening set</th><td>{{ match.opening_set_id }}</td></tr>
     <tr><th>Finished</th><td>{{ match.finished_at.strftime("%Y-%m-%d %H:%M:%S") if match.finished_at else "" }}</td></tr>

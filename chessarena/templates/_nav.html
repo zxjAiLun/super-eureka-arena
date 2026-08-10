@@ -1,0 +1,17 @@
+{# Shared site navigation (P4.11 commit 4).  Used by both the public and the
+   admin chrome so the two sides can never drift: ChessArena is always left,
+   the common public entries follow in the same order, an explicit
+   .nav-spacer separates them from the admin-only actions on the right. #}
+<nav class="topnav">
+  <a class="brand" href="{{ settings.base_path }}/">ChessArena</a>
+  <a href="{{ settings.base_path }}/live">Live</a>
+  <a href="{{ settings.base_path }}/matches/">Matches</a>
+  <a href="{{ settings.base_path }}/ratings/">Ratings</a>
+  <span class="nav-spacer" aria-hidden="true"></span>
+  {% if admin %}
+    <a href="{{ settings.base_path }}/admin/">Dashboard</a>
+    <a href="{{ settings.base_path }}/admin/tournaments/new">New Match</a>
+  {% else %}
+    <a href="{{ settings.base_path }}/admin/">Admin</a>
+  {% endif %}
+</nav>
