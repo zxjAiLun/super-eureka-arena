@@ -121,6 +121,19 @@ def eligible_openings(opening_set, plies: int | None = None) -> list[int]:
     return list(range(opening_set.position_count))
 
 
+def _eligible_fens_by_index(opening_set, plies: int | None, eligible_indices: list[int]):
+    """Starting FEN of every eligible opening, computed in ONE pass (S4.3D:
+    exclusion lists must not re-parse the book per index)."""
+    if _format(opening_set) == "pgn":
+        eligible = set(eligible_indices)
+        out: dict[int, str] = {}
+        for i, game in enumerate(_iter_games(Path(opening_set.file_path))):
+            if i in eligible:
+                out[i] = _game_fen(game, plies)
+        return out
+    return {i: _epd_fen_for_index(opening_set, i) for i in eligible_indices}
+
+
 def select_opening_indices(
     opening_set, count: int, plies: int | None, seed: int,
     exclude_fens: list[str] | None = None,
@@ -133,13 +146,10 @@ def select_opening_indices(
     by earlier tournaments from the pool (S4.3D: fresh formal-SPRT openings).
     """
     pool = eligible_openings(opening_set, plies)
-    if exclude_fens:
+    if exclude_fens and any(f and f.strip() for f in exclude_fens):
         excluded = {f.strip() for f in exclude_fens if f and f.strip()}
-        if excluded:
-            pool = [
-                i for i in pool
-                if opening_fen_for_index(opening_set, i, plies) not in excluded
-            ]
+        fens_by_index = _eligible_fens_by_index(opening_set, plies, pool)
+        pool = [i for i in pool if fens_by_index.get(i) not in excluded]
     if len(pool) < count:
         raise CutechessLaunchError(
             f"opening book has only {len(pool)} eligible openings "
