@@ -62,7 +62,7 @@
       <td>{{ m.engine_a_label }} vs {{ m.engine_b_label }}</td>
       <td>{{ m.candidate_wins }}-{{ m.draws }}-{{ m.candidate_losses }}</td>
       <td>{{ elo_delta_label(m.candidate_wins, m.draws, m.candidate_losses) }}</td>
-      <td>{{ m.finished_at.strftime("%Y-%m-%d %H:%M") if m.finished_at else "" }}</td>
+      <td>{{ m.finished_at|dt("%Y-%m-%d %H:%M") }}</td>
     </tr>
     {% endfor %}
   </tbody>

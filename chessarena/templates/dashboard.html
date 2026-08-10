@@ -40,7 +40,7 @@
       <td>{{ t.completed_pairs }}/{{ t.requested_pairs }}</td>
       <td>{{ t.candidate_wins }}-{{ t.draws }}-{{ t.candidate_losses }}</td>
       <td>{{ elo_delta_label(t.candidate_wins, t.draws, t.candidate_losses) }}</td>
-      <td>{{ t.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td>{{ t.created_at|dt("%Y-%m-%d %H:%M") }}</td>
     </tr>
   {% endfor %}
   </tbody>

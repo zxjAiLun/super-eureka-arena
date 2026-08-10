@@ -133,9 +133,9 @@
     <dt>Opening set</dt><dd>{{ tournament.opening_set_id }}</dd>
     <dt>Time control</dt><dd>{{ tournament.time_control|tc_label }} (Hash 32 MB, concurrency 1)</dd>
     <dt>Pairs</dt><dd>{{ tournament.completed_pairs }} / {{ tournament.requested_pairs }}</dd>
-    <dt>Created</dt><dd>{{ tournament.created_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</dd>
-    {% if tournament.started_at %}<dt>Started</dt><dd>{{ tournament.started_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</dd>{% endif %}
-    {% if tournament.finished_at %}<dt>Finished</dt><dd>{{ tournament.finished_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC</dd>{% endif %}
+    <dt>Created</dt><dd>{{ tournament.created_at|dt }}</dd>
+    {% if tournament.started_at %}<dt>Started</dt><dd>{{ tournament.started_at|dt }}</dd>{% endif %}
+    {% if tournament.finished_at %}<dt>Finished</dt><dd>{{ tournament.finished_at|dt }}</dd>{% endif %}
   </dl>
 </section>
 
@@ -234,7 +234,7 @@
     <tbody>
     {% for e in events %}
       <tr>
-        <td>{{ e.created_at.strftime("%H:%M:%S") }}</td>
+        <td>{{ e.created_at|dt("%H:%M:%S") }}</td>
         <td>{{ e.event_type }}</td>
         <td class="muted">{{ e.payload }}</td>
       </tr>

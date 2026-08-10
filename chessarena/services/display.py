@@ -5,9 +5,16 @@ can drift into its own formatting."""
 from __future__ import annotations
 
 import math
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from ..config import TIME_CONTROLS
+from ..models import coerce_utc
+
+# P4.12 commit 3: the database and scheduler stay UTC; only the USER-FACING
+# pages render times in Asia/Shanghai.
+DISPLAY_TZ = ZoneInfo("Asia/Shanghai")
 
 # Compact time-control labels (same semantics as the React Live page map):
 #   bullet_1_0 -> 1+0   blitz_3_2 -> 3+2   rapid_5_3 -> 5+3
@@ -72,3 +79,15 @@ def elo_delta_label(wins: int, draws: int, losses: int) -> str:
     if score <= 0.0:
         return "≤-800"
     return elo_delta_text(match_elo_delta(wins, draws, losses))
+
+
+def format_dt(value: Optional[datetime], fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """UTC-stored datetime rendered in the display timezone (Asia/Shanghai).
+
+    The database and scheduler stay UTC; only user-visible pages convert.
+    The explicit ``UTC+8`` suffix keeps the shown time unambiguous.
+    """
+    if value is None:
+        return ""
+    local = coerce_utc(value).astimezone(DISPLAY_TZ)
+    return local.strftime(f"{fmt} UTC+8")

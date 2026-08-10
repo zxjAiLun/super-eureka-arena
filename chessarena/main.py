@@ -37,11 +37,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="ChessArena", version="0.1.0")
 
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
-    # P4.11 commit 4: site-wide display helpers registered once so every
-    # template renders W-D-L / Δ Elo / time-control labels identically.
-    from .services.display import elo_delta_label, tc_label
+    # P4.11 commit 4 + P4.12 commit 3: site-wide display helpers registered
+    # once so every template renders W-D-L / Δ Elo / time-control labels and
+    # Asia/Shanghai times identically.
+    from .services.display import elo_delta_label, format_dt, tc_label
 
     templates.env.filters["tc_label"] = tc_label
+    templates.env.filters["dt"] = format_dt
     templates.env.globals["elo_delta_label"] = elo_delta_label
     app.state.settings = settings
     app.state.templates = templates

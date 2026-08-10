@@ -172,6 +172,42 @@ class TestTcLabel:
         assert tc_label("nope") == "nope"
 
 
+class TestDisplayTime:
+    def test_utc_to_shanghai_cross_day(self):
+        """2026-08-10 16:30 UTC must render as 2026-08-11 00:30 UTC+8."""
+        from datetime import datetime, timezone
+
+        from chessarena.services.display import format_dt
+
+        dt = datetime(2026, 8, 10, 16, 30, 0, tzinfo=timezone.utc)
+        assert format_dt(dt) == "2026-08-11 00:30:00 UTC+8"
+        assert format_dt(dt, "%Y-%m-%d %H:%M") == "2026-08-11 00:30 UTC+8"
+
+    def test_none_is_empty(self):
+        from chessarena.services.display import format_dt
+
+        assert format_dt(None) == ""
+
+    def test_naive_utc_accepted(self):
+        """Naive datetimes are treated as UTC (the storage contract)."""
+        from datetime import datetime
+
+        from chessarena.services.display import format_dt
+
+        assert format_dt(datetime(2026, 8, 10, 16, 30, 0)) == (
+            "2026-08-11 00:30:00 UTC+8"
+        )
+
+    def test_public_pages_render_utc8(self, app_client, settings,
+                                      engine_factory, tournament_factory):
+        _completed(settings, engine_factory, tournament_factory, "utc8-match",
+                   wins=1, draws=1, losses=1)
+        for path in ("/chessarena/", "/chessarena/matches/"):
+            r = app_client.get(path)
+            assert r.status_code == 200, path
+            assert "UTC+8" in r.text, f"page must display Asia/Shanghai time: {path}"
+
+
 # ---------------------------------------------------------------------------
 # Navigation contracts (section 1 + 8)
 # ---------------------------------------------------------------------------

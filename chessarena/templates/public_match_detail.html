@@ -24,7 +24,7 @@
     <tr><th>Engine B</th><td>{{ match.engine_b_label }}</td></tr>
     <tr><th>Pairs</th><td>{{ match.completed_pairs }} / {{ match.requested_pairs }}</td></tr>
     <tr><th>Opening set</th><td>{{ match.opening_set_id }}</td></tr>
-    <tr><th>Finished</th><td>{{ match.finished_at.strftime("%Y-%m-%d %H:%M:%S") if match.finished_at else "" }}</td></tr>
+    <tr><th>Finished</th><td>{{ match.finished_at|dt }}</td></tr>
   </tbody>
 </table>
 
