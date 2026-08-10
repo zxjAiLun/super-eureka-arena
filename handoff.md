@@ -11,6 +11,10 @@
 
 ChessArena 已完成从 ChessEngine 源码仓库的独立拆分（REPO SPLIT CLOSED），作为独立控制平面仓库运行：pytest 199 passed / 6 skipped、Playwright E2E、frontend build freshness 全绿。生产尚未部署；下一步是 production migration + capability backfill + 官方 8moves_v3 注册 + PGN smoke，之后进入 P4.3 Live Spectating。
 
+## 设计决策（frozen）
+
+- EngineVersion identity model（EngineBuild -> EnginePreset -> EngineVersion(=Elo participant) -> EngineChannel + RatingPool/Rating；--profile 仅限同源码树实验隔离）：见 [docs/design/engine-version-identity.md](docs/design/engine-version-identity.md)。Schema 实现推迟到 S4.3E promotion 之后。
+
 ## 仓库边界（拆分的核心契约）
 
 ```text
