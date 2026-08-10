@@ -20,6 +20,9 @@ from chessarena.models import (
     PENDING,
     QUEUED,
     RUNNING,
+    SPRT_ACCEPT_H0,
+    SPRT_ACCEPT_H1,
+    SPRT_MAX_PAIRS,
     Event,
     Game,
     PairJob,
@@ -133,6 +136,91 @@ def test_scheduler_completes_pair(scheduler, engine_factory, tournament_factory,
             "pair_started", "pair_completed", "game_completed",
             "verification_completed", "tournament_completed",
         }
+
+
+# ---------------------------------------------------------------------------
+# S4.3D formal pentanomial SPRT
+# ---------------------------------------------------------------------------
+def _sprt_cfg(max_pairs: int, elo0: float = 10.0, elo1: float = 30.0) -> dict:
+    from chessarena.services import sprt
+
+    lower, upper = sprt.wald_bounds(0.05, 0.05)
+    return {
+        "sprt": {
+            "enabled": True,
+            "unit": "pair",
+            "model": "pentanomial",
+            "elo_model": "logistic",
+            "elo0": elo0,
+            "elo1": elo1,
+            "alpha": 0.05,
+            "beta": 0.05,
+            "lower_bound": lower,
+            "upper_bound": upper,
+            "max_pairs": max_pairs,
+        }
+    }
+
+
+def test_sprt_stops_at_accept_h1(scheduler, engine_factory, tournament_factory):
+    # The fake engine makes candidate win both games of every pair (WW).
+    # With wide test hypotheses (-100/+30) the Wald upper boundary crosses at
+    # ~8 pairs, well below the 20-position opening ceiling.
+    tournament_id = tournament_factory(
+        status=QUEUED, pairs=20,
+        config_extra=_sprt_cfg(max_pairs=20, elo0=-100.0, elo1=30.0),
+    )
+    _run_until(
+        lambda: _load(engine_factory, tournament_id).status == SPRT_ACCEPT_H1,
+        scheduler,
+        max_ticks=200,
+    )
+    with engine_factory() as session:
+        tournament = session.get(Tournament, tournament_id)
+        assert tournament.completed_pairs < tournament.requested_pairs
+        assert tournament.status == SPRT_ACCEPT_H1
+        assert tournament.finished_at is not None
+    sprt_path = artifacts.tournament_run_dir(tournament_id) / "sprt.json"
+    import json
+
+    evidence = json.loads(sprt_path.read_text())
+    assert evidence["decision"] == "ACCEPT_H1"
+    assert evidence["llr"] >= evidence["upper_bound"]
+    assert evidence["ptnml"][4] == evidence["pairs"]  # all WW pairs
+    assert evidence["elo0"] == -100.0 and evidence["elo1"] == 30.0
+    assert evidence["binary_sha"] is not None
+
+
+def test_sprt_max_pairs_inconclusive(scheduler, engine_factory, tournament_factory,
+                                     monkeypatch):
+    # Neutral W+L pairs under the frozen +10/+30 contract never cross either
+    # boundary -> the tournament ends at the max-pairs ceiling as MAX_PAIRS.
+    monkeypatch.setenv("FAKE_CUTECHESS_RESULTS", "1-0,1-0")
+    tournament_id = tournament_factory(
+        status=QUEUED, pairs=20, config_extra=_sprt_cfg(max_pairs=20),
+    )
+    _run_until(
+        lambda: _load(engine_factory, tournament_id).status == SPRT_MAX_PAIRS,
+        scheduler,
+        max_ticks=200,
+    )
+    import json
+
+    evidence = json.loads(
+        (artifacts.tournament_run_dir(tournament_id) / "sprt.json").read_text()
+    )
+    assert evidence["decision"] == "MAX_PAIRS"
+    assert evidence["pairs"] == 20
+    assert evidence["llr"] > evidence["lower_bound"]
+    assert evidence["llr"] < evidence["upper_bound"]
+
+
+def test_sprt_accept_h0_transition_allowed():
+    from chessarena.models import TOURNAMENT_TRANSITIONS
+
+    assert SPRT_ACCEPT_H0 in TOURNAMENT_TRANSITIONS[RUNNING]
+    assert SPRT_ACCEPT_H1 in TOURNAMENT_TRANSITIONS[RUNNING]
+    assert SPRT_MAX_PAIRS in TOURNAMENT_TRANSITIONS[RUNNING]
 
 
 def test_tournament_artifacts_generated(scheduler, engine_factory,

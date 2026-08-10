@@ -122,14 +122,24 @@ def eligible_openings(opening_set, plies: int | None = None) -> list[int]:
 
 
 def select_opening_indices(
-    opening_set, count: int, plies: int | None, seed: int
+    opening_set, count: int, plies: int | None, seed: int,
+    exclude_fens: list[str] | None = None,
 ) -> list[int]:
     """Deterministic sample without replacement from the eligible pool.
 
     The same (opening_set, plies, seed, count) always yields the same
     indices; indices are stable across runs for a frozen snapshot.
+    ``exclude_fens`` (normalized starting FENs) removes openings already used
+    by earlier tournaments from the pool (S4.3D: fresh formal-SPRT openings).
     """
     pool = eligible_openings(opening_set, plies)
+    if exclude_fens:
+        excluded = {f.strip() for f in exclude_fens if f and f.strip()}
+        if excluded:
+            pool = [
+                i for i in pool
+                if opening_fen_for_index(opening_set, i, plies) not in excluded
+            ]
     if len(pool) < count:
         raise CutechessLaunchError(
             f"opening book has only {len(pool)} eligible openings "

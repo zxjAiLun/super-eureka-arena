@@ -432,8 +432,92 @@ class Scheduler:
             pair_job_id=pair.id,
         )
 
+        if self._maybe_sprt(session, tournament, now):
+            # SPRT boundary reached (or max pairs): the tournament is already
+            # in a terminal state; do NOT launch more pairs.
+            return
+
         if tournament.completed_pairs >= tournament.requested_pairs:
             self._finalize_tournament(session, tournament, now)
+
+    def _maybe_sprt(self, session, tournament: Tournament, now) -> bool:
+        """S4.3D: update the formal pentanomial SPRT after every VERIFIED
+        COMPLETE pair. Recomputes Ptnml from verified pairs, persists
+        ``sprt.json``, and stops the tournament on a Wald boundary or at the
+        max-pairs ceiling. Returns True when the tournament was stopped."""
+        snap = tournament.config_snapshot or {}
+        cfg = snap.get("sprt")
+        if not cfg or not cfg.get("enabled"):
+            return False
+        from .. import models
+        from . import artifacts, sprt as sprt_service
+
+        ptnml = [0] * 5
+        for pair_job in tournament.pair_jobs:
+            if pair_job.status != models.COMPLETED:
+                continue
+            verification = pair_job.verification or {}
+            computed = verification.get("candidate_perspective") or {}
+            ptnml[sprt_service.pair_points_index(
+                int(computed.get("wins", 0)),
+                int(computed.get("losses", 0)),
+                int(computed.get("draws", 0)),
+            )] += 1
+
+        result = sprt_service.sprt_llr_and_decision(
+            elo0=float(cfg["elo0"]),
+            elo1=float(cfg["elo1"]),
+            alpha=float(cfg["alpha"]),
+            beta=float(cfg["beta"]),
+            ptnml=ptnml,
+            max_pairs=int(cfg["max_pairs"]),
+        )
+
+        # Persist the SPRT evidence next to the other tournament artifacts.
+        run_dir = artifacts.tournament_run_dir(tournament.id)
+        sprt_evidence = {
+            "schema_version": 1,
+            "tournament_id": tournament.id,
+            "elo_model": cfg.get("elo_model"),
+            "elo0": cfg.get("elo0"),
+            "elo1": cfg.get("elo1"),
+            "alpha": cfg.get("alpha"),
+            "beta": cfg.get("beta"),
+            "lower_bound": cfg.get("lower_bound"),
+            "upper_bound": cfg.get("upper_bound"),
+            "pairs": result["pairs"],
+            "games": result["games"],
+            "ptnml": result["ptnml"],
+            "llr": result["llr"],
+            "decision": result["decision"],
+            "binary_sha": (snap.get("engine_a") or {}).get("binary_sha256"),
+            "candidate_preset": (snap.get("engine_a") or {}).get("preset_id"),
+            "baseline_preset": (snap.get("engine_b") or {}).get("preset_id"),
+            "opening_set": snap.get("opening_set"),
+        }
+        artifacts.write_json(run_dir, "sprt.json", sprt_evidence)
+
+        if result["decision"] in ("ACCEPT_H1", "ACCEPT_H0", "MAX_PAIRS"):
+            terminal = {
+                "ACCEPT_H1": models.SPRT_ACCEPT_H1,
+                "ACCEPT_H0": models.SPRT_ACCEPT_H0,
+                "MAX_PAIRS": models.SPRT_MAX_PAIRS,
+            }[result["decision"]]
+            tournament.status = terminal
+            tournament.finished_at = now
+            session.commit()
+            _record_event(
+                session,
+                tournament.id,
+                "tournament_sprt",
+                reason=result["decision"],
+                llr=result["llr"],
+                pairs=result["pairs"],
+            )
+            session.expire(tournament)
+            artifacts.generate_tournament_artifacts(tournament)
+            return True
+        return False
 
     def _write_pair_verification(self, pair: PairJob) -> None:
         if not pair.run_directory:

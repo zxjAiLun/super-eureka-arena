@@ -52,6 +52,26 @@ class EngineRef(BaseModel):
     custom_elo: Optional[int] = Field(default=None, ge=1)
 
 
+class SprtConfig(BaseModel):
+    """S4.3D frozen formal pentanomial SPRT contract.
+
+    Stored verbatim into the tournament's frozen ``config_snapshot``; no live
+    parameters are editable after the tournament starts.
+    """
+
+    enabled: bool = True
+    unit: str = "pair"
+    model: str = "pentanomial"
+    elo_model: str = "logistic"
+    elo0: float = 10.0
+    elo1: float = 30.0
+    alpha: float = 0.05
+    beta: float = 0.05
+    lower_bound: Optional[float] = None
+    upper_bound: Optional[float] = None
+    max_pairs: int = Field(ge=1)
+
+
 class TournamentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     engine_a: EngineRef
@@ -65,6 +85,11 @@ class TournamentCreate(BaseModel):
     # Phase C: PGN book depth (plies) and deterministic selection seed.
     opening_plies: Optional[int] = Field(default=None, ge=1)
     opening_seed: Optional[int] = Field(default=None, ge=0)
+    # S4.3D: optional frozen SPRT contract (formal promotion test).
+    sprt: Optional[SprtConfig] = None
+    # S4.3D: normalized starting FENs to exclude from the opening sample
+    # (prior tournaments must not leak into the formal test).
+    opening_exclude_fens: Optional[list[str]] = None
 
 
 class GameOut(BaseModel):

@@ -234,6 +234,7 @@ def tournament_factory(engine_factory, registered):
         status: str = "DRAFT",
         engine_a_profile: str = "current-final",
         engine_b_profile: str = "current",
+        config_extra: dict | None = None,
     ):
         from chessarena.models import PairJob, Tournament, utcnow
 
@@ -259,6 +260,8 @@ def tournament_factory(engine_factory, registered):
             "concurrency": 1,
             "requested_pairs": pairs,
         }
+        if config_extra:
+            config_snapshot.update(config_extra)
         with engine_factory() as session:
             tournament = Tournament(
                 name=name,

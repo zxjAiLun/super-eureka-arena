@@ -277,9 +277,29 @@ def create_tournament(
     opening_seed = body.opening_seed
     if opening_seed is None:
         opening_seed = random.randrange(1 << 31)
+
+    # S4.3D: the frozen SPRT contract makes the tournament a formal promotion
+    # test: requested pairs must equal the SPRT ceiling and the opening sample
+    # must exclude any prior-tournament starting positions.
+    sprt_cfg = body.sprt
+    if sprt_cfg is not None and sprt_cfg.enabled:
+        if body.pairs != sprt_cfg.max_pairs:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"SPRT tournaments must set pairs == sprt.max_pairs "
+                    f"({sprt_cfg.max_pairs}), got {body.pairs}"
+                ),
+            )
+        if sprt_cfg.elo0 >= sprt_cfg.elo1:
+            raise HTTPException(
+                status_code=422,
+                detail="SPRT requires elo0 < elo1",
+            )
     try:
         opening_indices = openings.select_opening_indices(
-            opening, body.pairs, opening_plies, opening_seed
+            opening, body.pairs, opening_plies, opening_seed,
+            exclude_fens=body.opening_exclude_fens,
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -389,6 +409,28 @@ def create_tournament(
         "concurrency": settings.max_concurrency,
         "requested_pairs": body.pairs,
     }
+    if sprt_cfg is not None and sprt_cfg.enabled:
+        # Freeze the immutable SPRT contract (with computed Wald boundaries)
+        # into the tournament snapshot. Never editable after creation.
+        from ..services import sprt as sprt_service
+
+        lower, upper = sprt_service.wald_bounds(sprt_cfg.alpha, sprt_cfg.beta)
+        config_snapshot["sprt"] = {
+            "enabled": True,
+            "unit": sprt_cfg.unit,
+            "model": sprt_cfg.model,
+            "elo_model": sprt_cfg.elo_model,
+            "elo0": sprt_cfg.elo0,
+            "elo1": sprt_cfg.elo1,
+            "alpha": sprt_cfg.alpha,
+            "beta": sprt_cfg.beta,
+            "lower_bound": lower,
+            "upper_bound": upper,
+            "max_pairs": sprt_cfg.max_pairs,
+        }
+        config_snapshot["sprt"]["excluded_openings"] = (
+            body.opening_exclude_fens or []
+        )
 
     tournament = Tournament(
         name=body.name,
