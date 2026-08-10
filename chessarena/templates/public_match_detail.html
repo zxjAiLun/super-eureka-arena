@@ -70,7 +70,7 @@
         <td>{{ g.black_engine }}</td>
         <td>{{ g.result or "" }}</td>
         <td>{{ g.termination or "" }}</td>
-        <td>{{ "analyzed" if g.analyzed else "" }}</td>
+        <td>{{ "Ready" if g.analyzed else "" }}</td>
         <td><a href="{{ settings.base_path }}/games/{{ g.id }}">Replay</a></td>
       </tr>
     {% endfor %}

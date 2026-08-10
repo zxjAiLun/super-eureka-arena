@@ -315,6 +315,8 @@ def test_wdl_order_everywhere(app_client, settings, engine_factory,
     assert "3-2-1" in detail.text
     assert "3-1-2" not in detail.text
     assert "Δ Elo (A−B)" in detail.text
+    # The diagnostics cell no longer emits the bare "analyzed" token.
+    assert ">analyzed<" not in detail.text
 
     admin_detail = app_client.get(f"/chessarena/admin/tournaments/{tid}")
     assert admin_detail.status_code == 200

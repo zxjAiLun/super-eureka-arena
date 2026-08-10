@@ -178,9 +178,11 @@ export default function LiveApp({ tournamentId, basePath }) {
             )}.`}
         </p>
         <p>
-          <a href={payload.match_url} className="action-link">
-            Open completed match replay
-          </a>
+          {payload.match_url && (
+            <a href={payload.match_url} className="action-link">
+              Open completed match replay
+            </a>
+          )}
         </p>
       </div>
     );

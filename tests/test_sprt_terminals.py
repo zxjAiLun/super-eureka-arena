@@ -163,6 +163,26 @@ def test_pinned_live_on_sprt_terminal_is_completed(
         assert body["match_url"] == f"/chessarena/matches/{tid}"
 
 
+def test_pinned_live_on_failed_or_cancelled_has_no_replay_link(
+    app_client, settings, engine_factory, tournament_factory
+):
+    """FAILED/CANCELLED pinned Live is over (completed phase) but must NOT
+    link to a replay — /matches/{id} 404s for matches without a result."""
+    for status in ("FAILED", "CANCELLED"):
+        tid, _ = _terminal(settings, engine_factory, tournament_factory,
+                           f"live-{status}", status=status,
+                           wins=1, draws=0, losses=1)
+        body = app_client.get(
+            f"/chessarena/public-api/v1/live?tournament_id={tid}"
+        ).json()
+        assert body["status"] == "completed", (
+            f"{status} must end the live phase, got {body['status']}"
+        )
+        assert body.get("match_url") is None, (
+            f"{status} must not link to a replay, got {body.get('match_url')}"
+        )
+
+
 def test_rated_sprt_early_stop_counts_actual_games(
     app_client, settings, engine_factory, tournament_factory
 ):

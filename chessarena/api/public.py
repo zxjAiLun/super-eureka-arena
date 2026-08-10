@@ -246,11 +246,16 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
         "draws": t.draws,
     }
     if t.status in ENDED_STATUSES:
-        return {
+        result = {
             **base,
             "status": "completed",
-            "match_url": f"{settings.base_path}/matches/{t.id}",
         }
+        # Only result-bearing terminals (COMPLETED / SPRT decisions) get a
+        # replay link: FAILED/CANCELLED matches have nothing to replay, and
+        # their /matches/{id} would 404.
+        if t.status in RESULT_TERMINAL_STATUSES:
+            result["match_url"] = f"{settings.base_path}/matches/{t.id}"
+        return result
 
     pair = _current_pair(t)
     if pair and pair.run_directory and Path(pair.run_directory).is_dir():
