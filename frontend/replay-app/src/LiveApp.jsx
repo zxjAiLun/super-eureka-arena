@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
+import { useStockfishAnalysis } from "./stockfish/useStockfishAnalysis";
+import { formatScoreOf, shareForUi } from "./eval";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -70,6 +72,17 @@ function Badges({ data }) {
 
 export default function LiveApp({ tournamentId, basePath }) {
   const { phase, payload } = useLive({ basePath, tournamentId });
+  // P4.11 commit 3: the SAME browser Stockfish core as the Replay page.
+  // Only the REAL telemetry current_fen enables it (opening-fen fallback or
+  // missing telemetry fails closed).  Called unconditionally — the hook must
+  // never move below an early return.
+  const liveFen = payload?.current_fen || null;
+  const browserEnabled = phase === "live" && Boolean(liveFen);
+  const browser = useStockfishAnalysis({
+    fen: liveFen,
+    enabled: browserEnabled,
+    basePath,
+  });
   const [boardSize, setBoardSize] = useState(480);
   const replayRef = useRef(null);
   // Clock countdown: anchored at the moment the last payload arrived; only
@@ -153,6 +166,7 @@ export default function LiveApp({ tournamentId, basePath }) {
   const sidesKnown = Boolean(white && black);
   const hasTelemetry = Boolean(payload.current_fen);
   const activeIsWhite = payload.side_to_move === "w";
+  const hasBrowserScore = browser.score_cp != null || browser.mate != null;
 
   const clockOf = (side, isActive) => {
     if (!side || side.clock_ms == null) return null;
@@ -209,6 +223,16 @@ export default function LiveApp({ tournamentId, basePath }) {
         </div>
         <div className="board-wrap" data-fen={fen} style={{ width: boardSize }}>
           <Chessboard options={{ position: fen, allowDragging: false }} />
+          {/* P4.11 commit 3: the eval bar reflects ONLY the browser
+              Stockfish evaluation — never a match engine's self-eval. */}
+          {hasBrowserScore && (
+            <div className="eval-bar" aria-label="Evaluation">
+              <div
+                className="eval-bar-white"
+                style={{ height: `${shareForUi(browser) * 100}%` }}
+              />
+            </div>
+          )}
         </div>
         <div className="player-card bottom">
           <span className="player-name">{white ? white.label : "—"}</span>
@@ -223,6 +247,42 @@ export default function LiveApp({ tournamentId, basePath }) {
       </div>
       <div className="replay-side-col">
         <Badges data={payload} />
+        {browserEnabled && (
+          <div className="analysis-panel">
+            {browser.status === "error" ? (
+              <>
+                <div className="analysis-score">
+                  Stockfish unavailable
+                  <span className="analysis-engine">
+                    Stockfish · browser
+                  </span>
+                </div>
+                <div className="analysis-line">engine failed to start</div>
+              </>
+            ) : (
+              <>
+                <div className="analysis-score">
+                  {formatScoreOf(browser) ?? "…"}
+                  <span className="analysis-engine">
+                    {browser.version
+                      ? `Stockfish ${browser.version.split(" ")[1]} · browser`
+                      : "Stockfish · browser"}
+                  </span>
+                </div>
+                <div className="analysis-line">
+                  {browser.depth != null && <>d{browser.depth} </>}
+                  {browser.nps != null && (
+                    <>· {(browser.nps / 1e6).toFixed(1)}M </>
+                  )}
+                  {browser.status === "searching" && <>· searching…</>}
+                </div>
+                {browser.pv && browser.pv.length > 0 && (
+                  <div className="analysis-pv">PV: {browser.pv.join(" ")}</div>
+                )}
+              </>
+            )}
+          </div>
+        )}
         {hasTelemetry && (
           <>
             <div className="live-meta">

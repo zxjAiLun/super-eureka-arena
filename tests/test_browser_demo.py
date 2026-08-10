@@ -1743,3 +1743,360 @@ def test_browser_live_fails_closed_without_colors(
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+LIVE_FEN_A = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+LIVE_FEN_B = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+LIVE_FEN_C = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+
+
+def _live_stream_lines(moves, engine_name, engine_index, cp, depth, pv, last):
+    """One position cycle of a cutechess -debug stream (game 1, A white).
+    The position is always built from LIVE_FEN_A plus the played moves."""
+    position = (
+        f"position fen {LIVE_FEN_A} moves {moves}" if moves
+        else f"position fen {LIVE_FEN_A}"
+    )
+    return "\n".join(
+        [
+            f">{engine_name}({engine_index}): {position}",
+            f">{engine_name}({engine_index}): go wtime 180000 btime 180000 winc 2000 binc 2000",
+            f"<{engine_name}({engine_index}): info depth {depth} score cp {cp} nodes 100 nps 200 time 3 pv {pv}",
+            f"<{engine_name}({engine_index}): bestmove {last}",
+        ]
+    )
+
+
+def test_browser_live_stockfish_eval_bar(
+    settings, engine_factory, registered
+):
+    """P4.11 commit 3: the Live page runs the SAME browser Stockfish core on
+    the REAL telemetry current_fen — one search per FEN across polls, eval
+    bar from Stockfish only, and stale old-FEN output never lands on the new
+    FEN.  A fake worker makes every score deterministic: FEN_A (white to
+    move) -> +1.00, FEN_B (black to move) -> -1.00, FEN_C -> +1.00."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    from chessarena.models import RUNNING, PairJob, Tournament, utcnow
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="live-stockfish-e2e",
+            status=RUNNING,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=1,
+            config_snapshot={
+                "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        tournament.started_at = utcnow()
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status=RUNNING,
+        )
+        session.add(pair)
+        session.flush()
+        run_dir = settings.run_root / tournament.id / "pairs" / "000000" / "attempt-01"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "opening.epd").write_text(LIVE_FEN_A + "\n", encoding="utf-8")
+        stdout = run_dir / "stdout.log"
+        stdout.write_text(
+            "Started game 1 of 2 (EngineA vs EngineB)\n"
+            + _live_stream_lines("", "EngineA", 0, 45, 12, "e2e4 e7e5", "e2e4")
+            + "\n",
+            encoding="utf-8",
+        )
+        pair.run_directory = str(run_dir)
+        session.commit()
+        tid = tournament.id
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/live?tournament_id={tid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+            page.route(
+                "**/stockfish.wasm.js",
+                lambda route: route.fulfill(
+                    status=200,
+                    content_type="text/javascript",
+                    body=FAKE_STALE_OUTPUT_WORKER,
+                ),
+            )
+            page.add_init_script(
+                """
+                window.__goCount = 0;
+                const __origPost = Worker.prototype.postMessage;
+                Worker.prototype.postMessage = function (msg) {
+                  if (typeof msg === 'string' && msg.startsWith('go ')) {
+                    window.__goCount += 1;
+                  }
+                  return __origPost.apply(this, arguments);
+                };
+                """
+            )
+            page.goto(f"{base}/live?tournament_id={tid}", wait_until="domcontentloaded")
+
+            # A. The browser Stockfish panel + eval bar appear on the REAL
+            # telemetry FEN and produce a deterministic score.
+            panel = page.locator(".analysis-panel")
+            panel.wait_for(state="visible", timeout=30000)
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && el.innerText.includes('1.00');
+                }""",
+                timeout=30000,
+            )
+            engine_label = page.locator(".analysis-engine").inner_text()
+            assert __import__("re").match(
+                r"^Stockfish \d{4}-\d{2}-\d{2} · browser", engine_label
+            ), f"expected versioned browser label, got {engine_label!r}"
+            assert page.locator(".eval-bar").count() == 1
+            assert page.locator(".board-wrap").get_attribute("data-fen") == LIVE_FEN_A
+            assert page.evaluate("window.__goCount") == 1, (
+                f"expected 1 go for the first FEN, got {page.evaluate('window.__goCount')}"
+            )
+
+            # B. The same FEN across live polling cycles must NOT restart the
+            # search (poll is ~1.5s; wait covers > 2 cycles).
+            page.wait_for_timeout(4000)
+            assert page.evaluate("window.__goCount") == 1, (
+                "no re-analysis per poll allowed: go count grew on an "
+                f"unchanged FEN -> {page.evaluate('window.__goCount')}"
+            )
+
+            # C. The stream advances A -> B: the board follows, exactly one
+            # new search starts, the panel switches to B's score, and the
+            # fake engine's stale +5.00 must never appear.
+            with open(stdout, "a", encoding="utf-8") as fh:
+                fh.write(_live_stream_lines("e2e4", "EngineB", 1, -30, 13,
+                                            "e7e5 g1f3", "e7e5") + "\n")
+            page.wait_for_function(
+                """() => {
+                    const b = document.querySelector('.board-wrap');
+                    return b && b.getAttribute('data-fen') === 'rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1';
+                }""",
+                timeout=20000,
+            )
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && el.innerText.includes('-1.00');
+                }""",
+                timeout=30000,
+            )
+            assert page.evaluate("window.__goCount") == 2, (
+                f"expected 2 go after A -> B, got {page.evaluate('window.__goCount')}"
+            )
+
+            # D. Fast A -> B -> C: the panel/board settle on C's +1.00, no
+            # stale A/B score and no fake stale +5.00.
+            with open(stdout, "a", encoding="utf-8") as fh:
+                fh.write(_live_stream_lines("e2e4 e7e5", "EngineA", 0, 60, 14,
+                                            "g1f3 g8f6", "g1f3") + "\n")
+            page.wait_for_function(
+                """() => {
+                    const b = document.querySelector('.board-wrap');
+                    return b && b.getAttribute('data-fen') === 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
+                }""",
+                timeout=20000,
+            )
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-score');
+                    return el && el.innerText.includes('1.00');
+                }""",
+                timeout=30000,
+            )
+            assert page.evaluate("window.__goCount") == 3, (
+                f"expected 3 go after A -> B -> C, got {page.evaluate('window.__goCount')}"
+            )
+            score_text = page.locator(".analysis-score").inner_text()
+            assert score_text.startswith("+1.00"), (
+                f"C must show the fresh +1.00, got {score_text!r}"
+            )
+            assert "5.00" not in score_text, f"stale output leaked: {score_text!r}"
+            # Engine self-evals remain independent of the browser Stockfish.
+            assert page.locator(".live-engine").count() == 2
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def test_browser_live_stockfish_failure_isolated(
+    settings, engine_factory, registered
+):
+    """P4.11 commit 3 (E): a browser Stockfish worker failure shows
+    'Stockfish unavailable' while the live telemetry (board, sides, clocks,
+    engine self-evals/PV) keeps working."""
+    import json
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    from chessarena.models import RUNNING, PairJob, Tournament, utcnow
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="live-stockfish-fail-e2e",
+            status=RUNNING,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=1,
+            config_snapshot={
+                "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        tournament.started_at = utcnow()
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status=RUNNING,
+        )
+        session.add(pair)
+        session.flush()
+        run_dir = settings.run_root / tournament.id / "pairs" / "000000" / "attempt-01"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "opening.epd").write_text(LIVE_FEN_A + "\n", encoding="utf-8")
+        (run_dir / "stdout.log").write_text(
+            "Started game 1 of 2 (EngineA vs EngineB)\n"
+            + _live_stream_lines("", "EngineA", 0, 45, 12, "e2e4 e7e5", "e2e4")
+            + "\n",
+            encoding="utf-8",
+        )
+        pair.run_directory = str(run_dir)
+        session.commit()
+        tid = tournament.id
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/live?tournament_id={tid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+            page.route("**/stockfish.wasm.js", lambda route: route.abort())
+            page.goto(f"{base}/live?tournament_id={tid}", wait_until="domcontentloaded")
+
+            # Worker failure -> visible unavailable state in the Stockfish
+            # panel only.
+            err_panel = page.locator(".analysis-panel")
+            err_panel.wait_for(state="visible", timeout=20000)
+            page.wait_for_function(
+                """() => {
+                    const el = document.querySelector('.analysis-panel');
+                    return el && el.innerText.includes('unavailable');
+                }""",
+                timeout=25000,
+            )
+            # Live telemetry is untouched: real board, sides, self-evals, PV.
+            page.wait_for_function(
+                """() => {
+                    const b = document.querySelector('.board-wrap');
+                    return b && b.getAttribute('data-fen') !== null;
+                }""",
+                timeout=20000,
+            )
+            assert page.locator(".board-wrap").get_attribute("data-fen") == LIVE_FEN_A
+            assert page.locator(".player-card.top .player-name").inner_text() == "EngineB"
+            assert page.locator(".player-card.bottom .player-name").inner_text() == "EngineA"
+            assert page.locator(".live-engine").count() == 2
+            engines = " ".join(page.locator(".live-engine").all_inner_texts())
+            assert "0.45" in engines, f"engine self-eval missing: {engines!r}"
+            assert page.locator(".live-engine-pv").count() >= 1
+            assert page.locator(".live-clock").count() >= 1
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()

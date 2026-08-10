@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Chessboard } from "react-chessboard";
 import { Chess } from "chess.js";
 import { useStockfishAnalysis } from "./stockfish/useStockfishAnalysis";
+import { formatScoreOf, shareForUi, shareOf } from "./eval";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -25,35 +26,6 @@ const TC_LABELS = {
 const INACCURACY = 0.1;
 const MISTAKE = 0.2;
 const BLUNDER = 0.35;
-
-function formatScoreOf(p) {
-  if (!p) return null;
-  if (p.mate != null) {
-    if (p.mate === 0) return null; // invalid mate score is not an evaluation
-    return p.mate > 0 ? `M${p.mate}` : `-M${Math.abs(p.mate)}`;
-  }
-  if (p.score_cp == null) return null;
-  const v = p.score_cp / 100;
-  return (v > 0 ? "+" : "") + v.toFixed(2);
-}
-
-// Strict winning share for swing classification: null when the evaluation is
-// unknown — never treated as an exactly equal position.
-function shareOf(p) {
-  if (!p) return null;
-  if (p.mate != null) {
-    if (p.mate === 0) return null;
-    return p.mate > 0 ? 0.98 : 0.02;
-  }
-  if (p.score_cp == null) return null;
-  return Math.min(0.98, Math.max(0.02, 1 / (1 + Math.exp(-p.score_cp / 250))));
-}
-
-// UI-safe share: unknown evaluations render as a neutral bar.
-function shareForUi(p) {
-  const s = shareOf(p);
-  return s == null ? 0.5 : s;
-}
 
 function moveMark(loss) {
   if (loss >= BLUNDER) return "??";
