@@ -99,9 +99,15 @@
   {% if rated_elo %}
     <p>
       Current Arena Elo — {{ tournament.time_control|tc_label }} pool:
-      <strong>{{ rated_elo.rating }}{% if rated_elo.upper_bound %}+{% elif rated_elo.lower_bound %}-{% endif %}</strong>
-      {% if rated_elo.provisional %}<span class="status status-pending">provisional</span>{% endif %}
-      ({{ rated_elo.games }} games)
+      <strong>{{ rated_elo.rating }}</strong>
+      {% if rated_elo.status == "initial" %}
+        <span class="status status-initial">initial</span>
+      {% elif rated_elo.status == "fixed" %}
+        <span class="status status-fixed">fixed anchor</span>
+      {% else %}
+        <span class="status status-rated">rated</span>
+      {% endif %}
+      ({{ rated_elo.games }} games · {{ rated_elo.wins }}-{{ rated_elo.draws }}-{{ rated_elo.losses }} W-D-L)
     </p>
   {% else %}
     <p class="muted">

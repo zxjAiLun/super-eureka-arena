@@ -527,9 +527,10 @@ def public_ratings(
             "display_name": e["display_name"],
             "rating": e["rating"],
             "games": e["games"],
-            "provisional": e["provisional"],
-            "lower_bound": e["lower_bound"],
-            "upper_bound": e["upper_bound"],
+            "wins": e["wins"],
+            "draws": e["draws"],
+            "losses": e["losses"],
+            "status": e["status"],
         }
         for e in rows["engines"]
     ]

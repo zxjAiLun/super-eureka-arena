@@ -186,20 +186,50 @@ def test_pinned_live_on_failed_or_cancelled_has_no_replay_link(
 def test_rated_sprt_early_stop_counts_actual_games(
     app_client, settings, engine_factory, tournament_factory
 ):
-    """An early-stopped rated SPRT run contributes its ACTUAL games (W+D+L)
-    to Arena Elo — never the requested-pairs ceiling."""
+    """An early-stopped rated SPRT run contributes its ACTUAL verified games
+    (W+D+L) to Arena Elo — never the requested-pairs ceiling."""
+    from chessarena.models import Game
+
     tid, _ = _terminal(
         settings, engine_factory, tournament_factory, "sprt-rated",
         status=SPRT_ACCEPT_H1, wins=70, draws=30, losses=34,
         requested_pairs=200, arena_elo_enabled=True, anchor_vs_engine=True,
     )
+    # Add 134 verified per-game rows matching the candidate aggregate (the
+    # engine is on side B; only the count matters for this contract).
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        pair = t.pair_jobs[0]
+        seq = [1.0] * 70 + [0.5] * 30 + [0.0] * 34
+        for i, candidate_score in enumerate(seq):
+            game_number = i + 1
+            a_white = game_number % 2 == 1
+            if candidate_score == 1.0:
+                result = "1-0" if a_white else "0-1"
+            elif candidate_score == 0.5:
+                result = "1/2-1/2"
+            else:
+                result = "0-1" if a_white else "1-0"
+            session.add(
+                Game(
+                    tournament_id=tid,
+                    pair_job_id=pair.id,
+                    game_number=game_number,
+                    white_engine="EngineA" if a_white else "EngineB",
+                    black_engine="EngineB" if a_white else "EngineA",
+                    opening_index=0,
+                    result=result,
+                    pgn_path="/unused/sprt-rated.pgn",
+                    verified=True,
+                )
+            )
+        session.commit()
     with engine_factory() as session:
         rows = compute_ratings(session)
     engines = rows["blitz_3_2"]["engines"]
-    assert len(engines) == 1
-    assert engines[0]["games"] == 70 + 30 + 34, (
-        "rated early-stop must count actual played games, not 200*2"
-    )
+    assert len(engines) >= 1
+    rated = [e for e in engines if e["games"] == 70 + 30 + 34]
+    assert rated, "the engine participant must count all 134 verified games"
     # The public leaderboard shows the actual game count too.
     page = app_client.get("/chessarena/ratings/")
     assert page.status_code == 200

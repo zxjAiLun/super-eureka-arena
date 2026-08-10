@@ -1,36 +1,47 @@
-"""Arena Elo (P4.8 v1): anchor-calibrated ratings recomputed from history.
+"""Arena Elo v2 (P4.12 commit 2): standard participant Elo recomputed from
+verified history.
 
 Design:
 
-- Only result-terminal matches with ``arena_elo_enabled`` that pair one engine
-  against a Stockfish anchor participate.  Engine-vs-engine matches are not
-  used in v1 (no rating propagation).
-- An anchor is a frozen snapshot side whose uci_options carry
-  ``UCI_LimitStrength == true`` and an integer ``UCI_Elo`` on a Stockfish
-  build; the anchor's Arena Elo is that UCI_Elo.
-- A competitor is the frozen engine configuration: binary_sha256 +
-  command_args + uci_options hashed together, so different builds/profiles
-  never merge even if they share a display name.
-- For each time-control pool (bullet_1_0 / blitz_3_2 / rapid_5_3) the engine
-  rating solves  sum_i n_i * E(R, a_i) = actual_score  with a binary search,
-  so the result depends only on the surviving match history, never on match
-  insertion order or a K-factor.
-- Ratings are recomputed every request; deleting a match simply removes its
-  contribution on the next recompute.
+- Identity is the frozen engine configuration (binary_sha256 + command_args +
+  uci_options hashed) — never the display name, so different builds/profiles
+  never merge even when names are identical.
+- Every public/enabled participant is shown even with zero games: ordinary
+  engines start at 1800 (status "initial").
+- Stockfish Limited anchors (UCI_LimitStrength + UCI_Elo on a registered
+  Stockfish build) are FIXED at their UCI_Elo and never update.
+- Rated history is only: arena_elo_enabled + result-terminal tournaments
+  (full schedule or early SPRT decision) + VERIFIED games.  Engine-vs-engine
+  matches update BOTH sides; engine-vs-anchor updates only the engine.
+- Per game, standard Elo with K=16:
+
+      Ea = 1 / (1 + 10 ** ((Rb - Ra) / 400))
+      Ra' = Ra + K * (Sa - Ea)        (Sa: win 1, draw 0.5, loss 0)
+
+- Play order is deterministic per time-control pool:
+  (finished_at, created_at, tournament_id, game_number).
+- Recomputed on every request; deleting a match removes its games on the
+  next recompute.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
 from typing import Optional
 
 from ..config import TIME_CONTROLS
-from ..models import RESULT_TERMINAL_STATUSES, EngineBuild, Tournament
+from ..models import (
+    RESULT_TERMINAL_STATUSES,
+    EngineBuild,
+    EnginePreset,
+    Game,
+    Tournament,
+    coerce_utc,
+)
 
-PROVISIONAL_GAMES = 50
-SEARCH_MARGIN = 1000
+INITIAL_RATING = 1800.0
+K_FACTOR = 16
 ANCHOR_ENGINE_NAME = "Stockfish"
 
 
@@ -81,69 +92,77 @@ def anchor_rating(side: dict) -> Optional[int]:
     return _uci_elo(side)
 
 
-@dataclass
-class AnchorMatch:
-    anchor_rating: int
-    games: int
-    score: float  # engine-side points (win=1, draw=0.5)
+def _side_from_preset(build: EngineBuild, preset: EnginePreset) -> dict:
+    return {
+        "preset_id": preset.preset_id,
+        "display_name": preset.display_name,
+        "build_id": build.build_id,
+        "command_args": list(preset.command_args or []),
+        "uci_options": dict(preset.uci_options or {}),
+        "binary_sha256": build.binary_sha256,
+    }
 
 
-@dataclass
-class RatingEntry:
-    fingerprint: str
-    display_name: str
-    matches: list[AnchorMatch] = field(default_factory=list)
-
-    @property
-    def games(self) -> int:
-        return sum(m.games for m in self.matches)
-
-    @property
-    def actual_score(self) -> float:
-        return sum(m.score for m in self.matches)
+def _score_for_a(game: Game) -> Optional[float]:
+    """Game result from Engine A's perspective (pair color contract: odd
+    game_number -> A is White)."""
+    a_white = game.game_number % 2 == 1
+    if game.result == "1-0":
+        return 1.0 if a_white else 0.0
+    if game.result == "0-1":
+        return 0.0 if a_white else 1.0
+    if game.result == "1/2-1/2":
+        return 0.5
+    return None
 
 
-def _expected_total(entries: list[AnchorMatch], rating: float) -> float:
-    total = 0.0
-    for m in entries:
-        total += m.games / (1 + 10 ** ((m.anchor_rating - rating) / 400))
-    return total
+def _history_side(side: dict) -> dict:
+    """Participant metadata for a snapshot side that is not a public preset
+    (archived/legacy configs that still have rated history)."""
+    return {
+        "display_name": (side.get("display_name")
+                         or side.get("preset_id") or "unknown"),
+        "is_anchor": False,
+        "anchor_rating": None,
+    }
 
 
-def solve_rating(entries: list[AnchorMatch]) -> dict:
-    """Binary-search the engine rating whose expected score matches the actual
-    score over its anchor matches.  Hitting a search bound means the data only
-    bounds the rating (e.g. 20/20 vs one weak anchor)."""
-    if not entries:
-        return {"rating": None, "lower_bound": False, "upper_bound": False}
-    anchors = [m.anchor_rating for m in entries]
-    lo = min(anchors) - SEARCH_MARGIN
-    hi = max(anchors) + SEARCH_MARGIN
-    actual = sum(m.score for m in entries)
-    total_games = sum(m.games for m in entries)
-
-    def f(r: float) -> float:
-        return _expected_total(entries, r) - actual
-
-    # f is strictly increasing in r.
-    if f(lo) > 0:
-        return {"rating": int(lo), "lower_bound": True, "upper_bound": False}
-    if f(hi) < 0:
-        return {"rating": int(hi), "lower_bound": False, "upper_bound": True}
-    for _ in range(60):
-        mid = (lo + hi) / 2
-        if f(mid) < 0:
-            lo = mid
-        else:
-            hi = mid
-    rating = int(round((lo + hi) / 2))
-    return {"rating": rating, "lower_bound": False, "upper_bound": False}
+def _participant_base(session) -> dict:
+    """fingerprint -> base metadata for every public/enabled participant."""
+    out: dict[str, dict] = {}
+    presets = (
+        session.query(EnginePreset)
+        .filter(
+            EnginePreset.public_visible.is_(True),
+            EnginePreset.enabled.is_(True),
+        )
+        .all()
+    )
+    for preset in presets:
+        build = (
+            session.query(EngineBuild)
+            .filter(EngineBuild.build_id == preset.build_id)
+            .first()
+        )
+        if build is None or not build.enabled:
+            continue
+        side = _side_from_preset(build, preset)
+        out[engine_fingerprint(side)] = {
+            "display_name": preset.display_name,
+            "is_anchor": is_anchor(session, side),
+            "anchor_rating": anchor_rating(side),
+        }
+    return out
 
 
 def compute_ratings(session) -> dict:
-    """{time_control: {"engines": [...], "anchors": [...]}} across all rated,
-    result-terminal matches (full schedule or early SPRT decision).
-    Deterministic: order-independent by construction."""
+    """{time_control: {"engines": [rows incl. anchors], "anchors": [...]}}.
+
+    Each engine row: fingerprint, display_name, rating (int), games, wins,
+    draws, losses, status (fixed | initial | rated).  Deterministic."""
+    participants = _participant_base(session)
+    pools: dict[str, list] = {tc: [] for tc in TIME_CONTROLS}
+
     matches = (
         session.query(Tournament)
         .filter(
@@ -152,96 +171,138 @@ def compute_ratings(session) -> dict:
         )
         .all()
     )
-    pools: dict[str, dict[str, RatingEntry]] = {
-        tc: {} for tc in TIME_CONTROLS
-    }
-    anchor_pool: dict[str, dict[int, str]] = {tc: {} for tc in TIME_CONTROLS}
-
     for t in matches:
         tc = t.time_control
         if tc not in pools:
             continue
         snap = t.config_snapshot or {}
         side_a, side_b = snap.get("engine_a") or {}, snap.get("engine_b") or {}
-        a_anchor = is_anchor(session, side_a)
-        b_anchor = is_anchor(session, side_b)
-        if a_anchor == b_anchor:
-            continue  # engine-vs-engine or anchor-vs-anchor: not rated in v1
-        if a_anchor:
-            engine_side, anchor_side = side_b, side_a
-            engine_on_a = False
-        else:
-            engine_side, anchor_side = side_a, side_b
-            engine_on_a = True
-        a_rating = anchor_rating(anchor_side)
-        if a_rating is None:
-            continue
-
-        fingerprint = engine_fingerprint(engine_side)
-        display = (engine_side.get("display_name")
-                   or engine_side.get("preset_id") or "unknown")
-        entry = pools[tc].setdefault(
-            fingerprint, RatingEntry(fingerprint=fingerprint,
-                                     display_name=display)
+        fp_a = engine_fingerprint(side_a)
+        fp_b = engine_fingerprint(side_b)
+        for fp, side in ((fp_a, side_a), (fp_b, side_b)):
+            participants.setdefault(fp, _history_side(side))
+        anchor_a = is_anchor(session, side_a)
+        anchor_b = is_anchor(session, side_b)
+        if anchor_a:
+            participants[fp_a] = {
+                "display_name": side_a.get("display_name")
+                or side_a.get("preset_id") or "unknown",
+                "is_anchor": True,
+                "anchor_rating": anchor_rating(side_a),
+            }
+        if anchor_b:
+            participants[fp_b] = {
+                "display_name": side_b.get("display_name")
+                or side_b.get("preset_id") or "unknown",
+                "is_anchor": True,
+                "anchor_rating": anchor_rating(side_b),
+            }
+        games = (
+            session.query(Game)
+            .filter(Game.tournament_id == t.id, Game.verified.is_(True))
+            .order_by(Game.game_number)
+            .all()
         )
-        # Score from the engine's perspective regardless of A/B placement:
-        # engine on A -> candidate wins, engine on B -> candidate losses.
-        if engine_on_a:
-            score = t.candidate_wins + 0.5 * t.draws
-        else:
-            score = t.candidate_losses + 0.5 * t.draws
-        # S4.3D early-stop: an SPRT match may end far below the requested
-        # ceiling, so the game count is the ACTUAL played games (W+D+L), not
-        # requested_pairs * 2 — otherwise early-stopped rated runs would be
-        # scored as if the full schedule had been played.
-        entry.matches.append(
-            AnchorMatch(
-                anchor_rating=a_rating,
-                games=t.candidate_wins + t.draws + t.candidate_losses,
-                score=score,
+        for g in games:
+            sa = _score_for_a(g)
+            if sa is None:
+                continue
+            order = (
+                coerce_utc(t.finished_at) or coerce_utc(t.created_at),
+                coerce_utc(t.created_at),
+                t.id,
+                g.game_number,
             )
-        )
-        anchor_pool[tc][a_rating] = (anchor_side.get("display_name")
-                                     or f"Stockfish {a_rating}")
+            pools[tc].append((order, fp_a, fp_b, sa))
 
     result: dict[str, dict] = {}
-    for tc, engines in pools.items():
-        entries = sorted(
-            engines.values(), key=lambda e: e.display_name.lower()
-        )
-        rows = []
-        for e in entries:
-            solved = solve_rating(e.matches)
-            rows.append(
+    for tc, pool_games in pools.items():
+        rows: dict[str, dict] = {}
+        for fp, base in participants.items():
+            anchor_elo = base.get("anchor_rating")
+            rows[fp] = {
+                "fingerprint": fp,
+                "display_name": base["display_name"],
+                "rating": (
+                    float(anchor_elo)
+                    if base["is_anchor"] and anchor_elo is not None
+                    else INITIAL_RATING
+                ),
+                "is_anchor": base["is_anchor"],
+                "games": 0,
+                "wins": 0,
+                "draws": 0,
+                "losses": 0,
+            }
+        for _, fp_a, fp_b, sa in sorted(pool_games):
+            a = rows.get(fp_a)
+            b = rows.get(fp_b)
+            if a is None or b is None:
+                continue
+            ea = 1 / (1 + 10 ** ((b["rating"] - a["rating"]) / 400))
+            sb = 1 - sa
+            if not a["is_anchor"]:
+                a["rating"] += K_FACTOR * (sa - ea)
+            if not b["is_anchor"]:
+                b["rating"] += K_FACTOR * (sb - (1 - ea))
+            a["games"] += 1
+            b["games"] += 1
+            if sa == 1.0:
+                a["wins"] += 1
+            elif sa == 0.5:
+                a["draws"] += 1
+            else:
+                a["losses"] += 1
+            if sb == 1.0:
+                b["wins"] += 1
+            elif sb == 0.5:
+                b["draws"] += 1
+            else:
+                b["losses"] += 1
+
+        engines = []
+        for fp, r in sorted(rows.items(),
+                            key=lambda kv: (kv[1]["display_name"].lower(), kv[0])):
+            engines.append(
                 {
-                    "fingerprint": e.fingerprint,
-                    "display_name": e.display_name,
-                    "rating": solved["rating"],
-                    "lower_bound": solved["lower_bound"],
-                    "upper_bound": solved["upper_bound"],
-                    "games": e.games,
-                    "provisional": e.games < PROVISIONAL_GAMES,
+                    "fingerprint": fp,
+                    "display_name": r["display_name"],
+                    "rating": int(round(r["rating"])),
+                    "games": r["games"],
+                    "wins": r["wins"],
+                    "draws": r["draws"],
+                    "losses": r["losses"],
+                    "status": (
+                        "fixed" if r["is_anchor"]
+                        else ("rated" if r["games"] else "initial")
+                    ),
                 }
             )
-        anchors = [
-            {"rating": r, "display_name": name}
-            for r, name in sorted(anchor_pool[tc].items())
-        ]
-        result[tc] = {"engines": rows, "anchors": anchors}
+        anchors = sorted(
+            (
+                {"rating": int(round(r["rating"])),
+                 "display_name": r["display_name"]}
+                for r in rows.values()
+                if r["is_anchor"]
+            ),
+            key=lambda a: a["rating"],
+        )
+        result[tc] = {"engines": engines, "anchors": anchors}
     return result
 
 
 def engine_rating(session, t: Tournament) -> Optional[dict]:
-    """Current Arena Elo of the (single) non-anchor side of a rated match, or
-    None when the match does not participate."""
+    """Current Arena Elo row of the match's candidate side (the non-anchor
+    side when exactly one side is a fixed anchor, else engine A), or None
+    when the match does not participate."""
     if t.status not in RESULT_TERMINAL_STATUSES or not t.arena_elo_enabled:
         return None
     snap = t.config_snapshot or {}
     side_a, side_b = snap.get("engine_a") or {}, snap.get("engine_b") or {}
-    if is_anchor(session, side_a) == is_anchor(session, side_b):
-        return None
-    engine_side = side_b if is_anchor(session, side_a) else side_a
-    fingerprint = engine_fingerprint(engine_side)
+    a_anchor = is_anchor(session, side_a)
+    b_anchor = is_anchor(session, side_b)
+    target = side_b if a_anchor and not b_anchor else side_a
+    fingerprint = engine_fingerprint(target)
     all_ratings = compute_ratings(session)
     for row in all_ratings.get(t.time_control, {}).get("engines", []):
         if row.get("fingerprint") == fingerprint:

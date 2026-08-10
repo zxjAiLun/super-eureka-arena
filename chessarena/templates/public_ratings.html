@@ -3,9 +3,9 @@
 {% block content %}
 <h1>Arena Ratings</h1>
 <p class="muted">
-  Anchor-calibrated ratings: Stockfish Limited (UCI_Elo) is a fixed anchor,
-  engine ratings are recomputed from rated match history. Not FIDE/CCRL/human
-  Elo — a rough relative scale for your engines.
+  Standard Elo recomputed from verified rated history (K=16, per game).
+  Stockfish Limited opponents are fixed anchors and never update. Not
+  FIDE/CCRL/human Elo — a rough relative scale for your engines.
 </p>
 
 <div class="tabs">
@@ -18,34 +18,35 @@
 {% if engines %}
 <table class="match-table">
   <thead>
-    <tr><th>Engine</th><th>Arena Elo</th><th>Games</th></tr>
+    <tr>
+      <th>Engine / Model</th>
+      <th>Elo</th>
+      <th>Games</th>
+      <th>W-D-L</th>
+      <th>Status</th>
+    </tr>
   </thead>
   <tbody>
     {% for e in engines %}
     <tr>
       <td>{{ e.display_name }}</td>
+      <td>{{ e.rating }}</td>
+      <td>{{ "—" if e.status == "fixed" else e.games }}</td>
       <td>
-        {% if e.rating is not none %}
-          {% if e.upper_bound %}&ge;{% elif e.lower_bound %}&le;{% endif %}{{ e.rating }}
-          {% if e.provisional %} <span class="status status-pending">provisional</span>{% endif %}
-        {% else %}<span class="muted">—</span>{% endif %}
+        {% if e.status == "fixed" %}—{% else %}
+          {{ e.wins }}-{{ e.draws }}-{{ e.losses }}
+        {% endif %}
       </td>
-      <td>{{ e.games }}</td>
+      <td>
+        <span class="status status-{{ e.status }}">
+          {{ {"fixed": "Fixed", "initial": "Initial", "rated": "Rated"}[e.status] }}
+        </span>
+      </td>
     </tr>
     {% endfor %}
   </tbody>
 </table>
 {% else %}
-<p class="muted">No rated matches in this pool yet. Check "Rated match" when creating a match against a Stockfish Limited opponent.</p>
+<p class="muted">No participants in this pool yet.</p>
 {% endif %}
-
-<h3>Fixed anchors</h3>
-<table class="match-table">
-  <thead><tr><th>Anchor</th><th>Arena Elo</th></tr></thead>
-  <tbody>
-    {% for a in anchors %}
-    <tr><td>{{ a.display_name }}</td><td>{{ a.rating }} (fixed)</td></tr>
-    {% endfor %}
-  </tbody>
-</table>
 {% endblock %}
