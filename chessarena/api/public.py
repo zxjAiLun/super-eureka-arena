@@ -1,9 +1,10 @@
 """Public, read-only replay API (anonymous).
 
-Only COMPLETED tournaments and their verified games are exposed, with a
-whitelist of display fields.  No build ids, binary SHAs, server paths,
-commands, logs, manifests or provenance are ever returned.  Write endpoints
-stay behind the authenticated ``/api/v1`` tree (enforced by nginx).
+Only result-terminal tournaments (full-schedule COMPLETED or early SPRT
+decisions — S4.3D) and their verified games are exposed, with a whitelist of
+display fields.  No build ids, binary SHAs, server paths, commands, logs,
+manifests or provenance are ever returned.  Write endpoints stay behind the
+authenticated ``/api/v1`` tree (enforced by nginx).
 """
 
 from __future__ import annotations
@@ -19,9 +20,10 @@ from sqlalchemy.orm import Session
 from ..config import get_settings
 from ..db import get_db
 from ..models import (
-    COMPLETED,
+    ENDED_STATUSES,
     PAUSING,
     QUEUED,
+    RESULT_TERMINAL_STATUSES,
     RUNNING,
     EngineBuild,
     EnginePreset,
@@ -106,11 +108,12 @@ def list_public_matches(
     limit: int = 50,
     session: Session = Depends(get_db),
 ):
-    """Public list of COMPLETED tournaments (newest first)."""
+    """Public list of result-terminal tournaments (newest first): the full
+    schedule COMPLETED or an early SPRT decision (S4.3D)."""
     limit = max(1, min(limit, 200))
     rows = (
         session.query(Tournament)
-        .filter(Tournament.status == COMPLETED)
+        .filter(Tournament.status.in_(RESULT_TERMINAL_STATUSES))
         .order_by(Tournament.finished_at.desc())
         .limit(limit)
         .all()
@@ -123,13 +126,13 @@ def get_public_match(
     tournament_id: str,
     session: Session = Depends(get_db),
 ):
-    """Public detail of a COMPLETED tournament plus its verified games."""
+    """Public detail of a result-terminal tournament plus its verified games."""
     t = (
         session.query(Tournament)
         .filter(Tournament.id == tournament_id)
         .first()
     )
-    if t is None or t.status != COMPLETED:
+    if t is None or t.status not in RESULT_TERMINAL_STATUSES:
         raise HTTPException(status_code=404, detail="match not found")
     games = (
         session.query(Game)
@@ -158,7 +161,7 @@ def get_public_game_pgn(
         .filter(Tournament.id == game.tournament_id)
         .first()
     )
-    if tournament is None or tournament.status != COMPLETED:
+    if tournament is None or tournament.status not in RESULT_TERMINAL_STATUSES:
         raise HTTPException(status_code=404, detail="game not found")
     try:
         pgn = read_single_game_pgn(game)
@@ -190,7 +193,7 @@ def get_public_game_analysis(
         .filter(Tournament.id == game.tournament_id)
         .first()
     )
-    if tournament is None or tournament.status != COMPLETED:
+    if tournament is None or tournament.status not in RESULT_TERMINAL_STATUSES:
         raise HTTPException(status_code=404, detail="game not found")
     try:
         data = read_analysis(game)
@@ -242,7 +245,7 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
         "candidate_losses": t.candidate_losses,
         "draws": t.draws,
     }
-    if t.status == COMPLETED:
+    if t.status in ENDED_STATUSES:
         return {
             **base,
             "status": "completed",
@@ -422,7 +425,7 @@ def _render(request: Request, template: str, **ctx):
 def _recent_matches(session: Session, limit: int = 12):
     rows = (
         session.query(Tournament)
-        .filter(Tournament.status == COMPLETED)
+        .filter(Tournament.status.in_(RESULT_TERMINAL_STATUSES))
         .order_by(Tournament.finished_at.desc())
         .limit(limit)
         .all()
@@ -444,7 +447,7 @@ def public_home(request: Request, session: Session = Depends(get_db)):
     live_pair = _current_pair(live) if live is not None else None
     latest = (
         session.query(Tournament)
-        .filter(Tournament.status == COMPLETED)
+        .filter(Tournament.status.in_(RESULT_TERMINAL_STATUSES))
         .order_by(Tournament.finished_at.desc())
         .first()
     )
@@ -547,7 +550,7 @@ def public_match_detail(
         .filter(Tournament.id == tournament_id)
         .first()
     )
-    if t is None or t.status != COMPLETED:
+    if t is None or t.status not in RESULT_TERMINAL_STATUSES:
         raise HTTPException(status_code=404, detail="match not found")
     games = (
         session.query(Game)
@@ -587,7 +590,7 @@ def public_game(
         .filter(Tournament.id == game.tournament_id)
         .first()
     )
-    if tournament is None or tournament.status != COMPLETED:
+    if tournament is None or tournament.status not in RESULT_TERMINAL_STATUSES:
         raise HTTPException(status_code=404, detail="game not found")
     pair_index = game.pair_job.pair_index if game.pair_job else 0
     return _render(

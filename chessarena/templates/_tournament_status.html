@@ -8,7 +8,7 @@
   <p>
     Progress: {{ tournament.completed_pairs }} / {{ tournament.requested_pairs }} pairs
     · W-D-L {{ tournament.candidate_wins }}-{{ tournament.draws }}-{{ tournament.candidate_losses }}
-    · Δ Elo (A−B) {{ tournament.elo_delta|elo_delta_text }}
+    · Δ Elo (A−B) {{ elo_delta_label(tournament.candidate_wins, tournament.draws, tournament.candidate_losses) }}
   </p>
   <p class="muted">Current pair:
     {% set ns = namespace(current=None) %}

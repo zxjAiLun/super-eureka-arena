@@ -82,6 +82,22 @@ TOURNAMENT_TRANSITIONS = {
     SPRT_MAX_PAIRS: set(),
 }
 
+# S4.3D + P4.11 commit 4 closure: the successful terminal statuses that carry
+# a replayable result.  A match may end with the full requested schedule
+# (COMPLETED) or early on a formal SPRT decision (ACCEPT_H1 / ACCEPT_H0 /
+# MAX_PAIRS).  FAILED/CANCELLED carry no result to replay, so they are NOT
+# part of this set.  Every public history/detail/replay/PGN/diagnostics/Live
+# contract must use this set instead of hardcoding `status == COMPLETED`.
+RESULT_TERMINAL_STATUSES = frozenset(
+    {COMPLETED, SPRT_ACCEPT_H1, SPRT_ACCEPT_H0, SPRT_MAX_PAIRS}
+)
+
+# Every status where the match is over: a pinned Live page must never keep
+# showing "live" (with browser Stockfish running) for any of these.
+ENDED_STATUSES = frozenset(
+    TOURNAMENT_STATUSES - {DRAFT, QUEUED, RUNNING, PAUSING, PAUSED}
+)
+
 # Pair job lifecycle (section 10.2)
 PENDING = "PENDING"
 RUNNING = "RUNNING"

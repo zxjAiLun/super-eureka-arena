@@ -57,3 +57,18 @@ def elo_delta_text(delta: Optional[int]) -> str:
     if delta > 0:
         return f"+{delta}"
     return str(delta)
+
+
+def elo_delta_label(wins: int, draws: int, losses: int) -> str:
+    """User-facing Δ Elo (A−B) with the extreme case rendered as a BOUND:
+    100% score is +∞ mathematically, so it displays as '≥+800' (0% as
+    '≤-800') — never as an exact '+800'/'−800' value."""
+    played = wins + draws + losses
+    if played <= 0:
+        return "—"
+    score = (wins + 0.5 * draws) / played
+    if score >= 1.0:
+        return "≥+800"
+    if score <= 0.0:
+        return "≤-800"
+    return elo_delta_text(match_elo_delta(wins, draws, losses))

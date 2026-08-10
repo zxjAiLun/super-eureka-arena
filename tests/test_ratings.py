@@ -55,7 +55,13 @@ def stockfish_anchor_build(engine_factory):
 
 def _completed_rated(engine_factory, tournament_factory, *, tc="blitz_3_2",
                      wins, losses, draws, anchor_a=True, anchor=SF_A,
-                     pairs=10, enabled=True):
+                     pairs=None, enabled=True):
+    """Create a rated COMPLETED match.  Since P4.11 commit 4 the game count
+    is the ACTUAL played games (W+D+L), so callers must pass pairs matching
+    the result totals (pairs * 2 == wins + draws + losses) unless they set
+    pairs explicitly for an early-stop scenario."""
+    if pairs is None:
+        pairs = (wins + draws + losses) // 2
     tid = tournament_factory(
         name="rated", pairs=pairs, time_control=tc, status=COMPLETED
     )
@@ -81,15 +87,15 @@ def _completed_rated(engine_factory, tournament_factory, *, tc="blitz_3_2",
 
 
 def test_single_anchor_50pct_equals_anchor(engine_factory, tournament_factory):
-    # Engine on side B: engine score = candidate_losses + 0.5*draws = 10/20.
+    # Engine on side B: engine score = candidate_losses + 0.5*draws = 5/10.
     _completed_rated(engine_factory, tournament_factory,
-                     wins=0, losses=10, draws=0, anchor=SF_A)
+                     wins=5, losses=5, draws=0, anchor=SF_A)
     with engine_factory() as session:
         pools = ratings.compute_ratings(session)
     rows = pools["blitz_3_2"]["engines"]
     assert len(rows) == 1
     assert rows[0]["rating"] == 2000
-    assert rows[0]["games"] == 20
+    assert rows[0]["games"] == 10  # actual played games (W+D+L)
 
 
 def test_known_logistic_score_above_anchor(engine_factory, tournament_factory):
@@ -176,7 +182,7 @@ def test_custom_elo_anchor_recognized(engine_factory, tournament_factory):
         "uci_options": {"UCI_LimitStrength": True, "UCI_Elo": 1850},
     }
     _completed_rated(engine_factory, tournament_factory,
-                     wins=0, losses=10, draws=0, anchor=custom)
+                     wins=5, losses=5, draws=0, anchor=custom)
     with engine_factory() as session:
         pools = ratings.compute_ratings(session)
     assert pools["blitz_3_2"]["anchors"] == [
@@ -189,7 +195,7 @@ def test_tc_pools_do_not_mix(engine_factory, tournament_factory):
     _completed_rated(engine_factory, tournament_factory,
                      wins=10, losses=10, draws=0, anchor=SF_B, tc="bullet_1_0")
     _completed_rated(engine_factory, tournament_factory,
-                     wins=0, losses=10, draws=0, anchor=SF_A, tc="rapid_5_3")
+                     wins=5, losses=5, draws=0, anchor=SF_A, tc="rapid_5_3")
     with engine_factory() as session:
         pools = ratings.compute_ratings(session)
     assert pools["bullet_1_0"]["engines"][0]["rating"] == 1800
@@ -200,9 +206,9 @@ def test_tc_pools_do_not_mix(engine_factory, tournament_factory):
 def test_engine_on_anchor_side_scored_from_engine_perspective(
     engine_factory, tournament_factory
 ):
-    # Engine on side A (anchor on B) wins 2/10 vs SF 2000 -> 10% -> rating < 2000.
+    # Engine on side A (anchor on B) wins 2/20 vs SF 2000 -> 10% -> rating < 2000.
     _completed_rated(engine_factory, tournament_factory,
-                     wins=2, losses=8, draws=0, anchor_a=False, anchor=SF_A)
+                     wins=2, losses=18, draws=0, anchor_a=False, anchor=SF_A)
     with engine_factory() as session:
         rows = ratings.compute_ratings(session)["blitz_3_2"]["engines"]
     expected = 2000 - 400 * math.log10(9)

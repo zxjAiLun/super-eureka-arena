@@ -2,7 +2,7 @@
 
 Design:
 
-- Only COMPLETED matches with ``arena_elo_enabled`` that pair one engine
+- Only result-terminal matches with ``arena_elo_enabled`` that pair one engine
   against a Stockfish anchor participate.  Engine-vs-engine matches are not
   used in v1 (no rating propagation).
 - An anchor is a frozen snapshot side whose uci_options carry
@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from ..config import TIME_CONTROLS
-from ..models import COMPLETED, EngineBuild, Tournament
+from ..models import RESULT_TERMINAL_STATUSES, EngineBuild, Tournament
 
 PROVISIONAL_GAMES = 50
 SEARCH_MARGIN = 1000
@@ -142,11 +142,12 @@ def solve_rating(entries: list[AnchorMatch]) -> dict:
 
 def compute_ratings(session) -> dict:
     """{time_control: {"engines": [...], "anchors": [...]}} across all rated,
-    completed matches.  Deterministic: order-independent by construction."""
+    result-terminal matches (full schedule or early SPRT decision).
+    Deterministic: order-independent by construction."""
     matches = (
         session.query(Tournament)
         .filter(
-            Tournament.status == COMPLETED,
+            Tournament.status.in_(RESULT_TERMINAL_STATUSES),
             Tournament.arena_elo_enabled.is_(True),
         )
         .all()
@@ -189,9 +190,16 @@ def compute_ratings(session) -> dict:
             score = t.candidate_wins + 0.5 * t.draws
         else:
             score = t.candidate_losses + 0.5 * t.draws
+        # S4.3D early-stop: an SPRT match may end far below the requested
+        # ceiling, so the game count is the ACTUAL played games (W+D+L), not
+        # requested_pairs * 2 — otherwise early-stopped rated runs would be
+        # scored as if the full schedule had been played.
         entry.matches.append(
-            AnchorMatch(anchor_rating=a_rating, games=t.requested_pairs * 2,
-                        score=score)
+            AnchorMatch(
+                anchor_rating=a_rating,
+                games=t.candidate_wins + t.draws + t.candidate_losses,
+                score=score,
+            )
         )
         anchor_pool[tc][a_rating] = (anchor_side.get("display_name")
                                      or f"Stockfish {a_rating}")
@@ -226,7 +234,7 @@ def compute_ratings(session) -> dict:
 def engine_rating(session, t: Tournament) -> Optional[dict]:
     """Current Arena Elo of the (single) non-anchor side of a rated match, or
     None when the match does not participate."""
-    if t.status != COMPLETED or not t.arena_elo_enabled:
+    if t.status not in RESULT_TERMINAL_STATUSES or not t.arena_elo_enabled:
         return None
     snap = t.config_snapshot or {}
     side_a, side_b = snap.get("engine_a") or {}, snap.get("engine_b") or {}

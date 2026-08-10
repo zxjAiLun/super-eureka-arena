@@ -10,6 +10,7 @@ import pytest
 
 from chessarena.models import COMPLETED, EngineBuild, Tournament, utcnow
 from chessarena.services.display import (
+    elo_delta_label,
     elo_delta_text,
     match_elo_delta,
     tc_label,
@@ -136,6 +137,17 @@ class TestEloDelta:
     def test_all_losses_clamped(self):
         assert match_elo_delta(0, 0, 5) == -800
         assert elo_delta_text(-800) == "-800"
+
+    def test_extreme_labels_are_bounds_not_exact(self):
+        """100% / 0% scores are +∞ / −∞ mathematically: the display must
+        read as a bound (≥+800 / ≤-800), never an exact value."""
+        assert elo_delta_label(5, 0, 0) == "≥+800"
+        assert elo_delta_label(0, 0, 5) == "≤-800"
+        # Mid-range deltas still render as exact signed integers.
+        assert elo_delta_label(3, 2, 1) == "+120"
+        assert elo_delta_label(1, 2, 3) == "-120"
+        assert elo_delta_label(1, 0, 1) == "0"
+        assert elo_delta_label(0, 0, 0) == "—"
 
     def test_nothing_played(self):
         assert match_elo_delta(0, 0, 0) is None

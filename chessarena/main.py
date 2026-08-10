@@ -39,10 +39,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
     # P4.11 commit 4: site-wide display helpers registered once so every
     # template renders W-D-L / Δ Elo / time-control labels identically.
-    from .services.display import elo_delta_text, tc_label
+    from .services.display import elo_delta_label, tc_label
 
     templates.env.filters["tc_label"] = tc_label
-    templates.env.filters["elo_delta_text"] = elo_delta_text
+    templates.env.globals["elo_delta_label"] = elo_delta_label
     app.state.settings = settings
     app.state.templates = templates
     app.state.session_factory = session_factory

@@ -9,13 +9,13 @@
   {% include "_tournament_status.html" %}
 </div>
 
-{% if tournament.status == "COMPLETED" %}
+{% if result_terminal %}
 <section class="panel result-summary">
   <h3>Result</h3>
   <dl class="result-grid">
     <dt>Matchup</dt><dd>{{ engine_a_label }} vs {{ engine_b_label }}</dd>
     <dt>W-D-L</dt><dd>{{ tournament.candidate_wins }}-{{ tournament.draws }}-{{ tournament.candidate_losses }}</dd>
-    <dt>Δ Elo (A−B)</dt><dd>{{ elo_delta|elo_delta_text }}</dd>
+    <dt>Δ Elo (A−B)</dt><dd>{{ elo_delta_label(tournament.candidate_wins, tournament.draws, tournament.candidate_losses) }}</dd>
     <dt>Games</dt><dd>{{ tournament.candidate_wins + tournament.candidate_losses + tournament.draws }}</dd>
     <dt>Pairs</dt><dd>{{ tournament.completed_pairs }} / {{ tournament.requested_pairs }}</dd>
     <dt>Time control</dt><dd>{{ tournament.time_control|tc_label }}</dd>
@@ -67,6 +67,12 @@
     </form>
   {% elif tournament.status == "COMPLETED" %}
     <span class="muted">Completed</span>
+  {% elif tournament.status == "SPRT_ACCEPT_H1" %}
+    <span class="status status-completed">SPRT finished — H1 accepted</span>
+  {% elif tournament.status == "SPRT_ACCEPT_H0" %}
+    <span class="status status-completed">SPRT finished — H0 accepted</span>
+  {% elif tournament.status == "SPRT_MAX_PAIRS" %}
+    <span class="muted">SPRT finished — max pairs reached</span>
   {% elif tournament.status == "FAILED" %}
     <span class="danger">Failed: {{ tournament.failure_reason }}</span>
   {% elif tournament.status == "CANCELLED" %}
@@ -102,7 +108,7 @@
       {% if tournament.arena_elo_enabled %}No Arena Elo yet for this configuration in this pool.{% else %}This match does not count toward Arena Elo.{% endif %}
     </p>
   {% endif %}
-  {% if tournament.status == "COMPLETED" %}
+  {% if result_terminal %}
   <form method="post" action="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/rating-toggle" style="display:inline">
     <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">
     <button type="submit" class="linklike">
@@ -133,7 +139,7 @@
   {% include "_pair_progress.html" %}
 </section>
 
-{% if tournament.status == "COMPLETED" %}
+{% if result_terminal %}
 <section class="panel">
   <h3>Bulk diagnostics</h3>
   <p class="muted">Precompute whole-game diagnostics (?!/??/biggest-swing) for a subset; the worker prepares them when idle (matches always win CPU). Replay's interactive Stockfish analysis needs none of this.</p>

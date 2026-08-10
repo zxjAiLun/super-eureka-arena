@@ -33,7 +33,7 @@
   </p>
   <p>
     W-D-L: {{ latest.candidate_wins }}-{{ latest.draws }}-{{ latest.candidate_losses }}
-    · Δ Elo (A−B): {{ latest.elo_delta|elo_delta_text }}
+    · Δ Elo (A−B): {{ elo_delta_label(latest.candidate_wins, latest.draws, latest.candidate_losses) }}
   </p>
   <p>
     <a class="action-link" href="{{ settings.base_path }}/matches/{{ latest.id }}">Open match</a>
@@ -61,7 +61,7 @@
       <td>{{ m.time_control|tc_label }}</td>
       <td>{{ m.engine_a_label }} vs {{ m.engine_b_label }}</td>
       <td>{{ m.candidate_wins }}-{{ m.draws }}-{{ m.candidate_losses }}</td>
-      <td>{{ m.elo_delta|elo_delta_text }}</td>
+      <td>{{ elo_delta_label(m.candidate_wins, m.draws, m.candidate_losses) }}</td>
       <td>{{ m.finished_at.strftime("%Y-%m-%d %H:%M") if m.finished_at else "" }}</td>
     </tr>
     {% endfor %}

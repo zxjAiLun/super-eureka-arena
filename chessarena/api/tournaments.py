@@ -34,7 +34,11 @@ from ..models import (
     PAUSING,
     PENDING,
     QUEUED,
+    RESULT_TERMINAL_STATUSES,
     RUNNING,
+    SPRT_ACCEPT_H0,
+    SPRT_ACCEPT_H1,
+    SPRT_MAX_PAIRS,
     EngineBuild,
     EnginePreset,
     Event,
@@ -802,7 +806,10 @@ def admin_dashboard(request: Request, session: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # P4.4 Fast Match Workflow: "last used" prefs + prefill for Run again.
 # ---------------------------------------------------------------------------
-DELETABLE_STATUSES = frozenset({DRAFT, COMPLETED, FAILED, CANCELLED})
+DELETABLE_STATUSES = frozenset(
+    {DRAFT, COMPLETED, FAILED, CANCELLED,
+     SPRT_ACCEPT_H1, SPRT_ACCEPT_H0, SPRT_MAX_PAIRS}
+)
 
 
 def _prefs_path(settings: Settings) -> Path:
@@ -1070,6 +1077,7 @@ def admin_tournament_detail(
             "events": events,
             "score_percent": _score_percent(tournament),
             "elo_delta": elo_delta,
+            "result_terminal": tournament.status in RESULT_TERMINAL_STATUSES,
             "opening_plies": opening_plies,
             "run_again": run_again,
             "engine_a_label": engine_a_label,
@@ -1201,7 +1209,7 @@ async def admin_game_analyze(
     session: Session = Depends(get_db),
 ):
     """Queue a verified game for Stockfish analysis (P4.7).  Only verified
-    games in COMPLETED matches; re-submitting re-analyzes."""
+    games in result-terminal matches; re-submitting re-analyzes."""
     form = dict(await request.form())
     validate_csrf_token(request, form)
     game = session.query(Game).filter(Game.id == game_id).first()
@@ -1212,7 +1220,7 @@ async def admin_game_analyze(
         .filter(Tournament.id == game.tournament_id)
         .first()
     )
-    if tournament is None or tournament.status != COMPLETED:
+    if tournament is None or tournament.status not in RESULT_TERMINAL_STATUSES:
         raise HTTPException(
             status_code=409,
             detail="only completed matches can be analyzed",
@@ -1257,7 +1265,7 @@ async def admin_tournament_analyze_bulk(
     if scope not in ("decisive", "losses"):
         raise HTTPException(status_code=400, detail="unknown analysis scope")
     t = _get_tournament_or_404(session, tournament_id)
-    if t.status != COMPLETED:
+    if t.status not in RESULT_TERMINAL_STATUSES:
         raise HTTPException(
             status_code=409,
             detail="only completed matches can be analyzed",

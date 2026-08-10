@@ -21,9 +21,21 @@ function eloDeltaText(delta) {
   return delta > 0 ? `+${delta}` : `${delta}`;
 }
 
+// Display label: 100% / 0% scores are mathematical +∞ / −∞, so they render
+// as the bounds ≥+800 / ≤-800, never as an exact value.
+function eloDeltaLabel(wins, draws, losses) {
+  const played = wins + draws + losses;
+  if (!played) return "—";
+  const s = (wins + 0.5 * draws) / played;
+  if (s >= 1) return "≥+800";
+  if (s <= 0) return "≤-800";
+  return eloDeltaText(matchEloDelta(wins, draws, losses));
+}
+
 const TC_LABELS = {
   bullet_1_0: "1+0",
   blitz_3_2: "3+2",
+  blitz_10_01: "10s+0.1s",
   rapid_5_3: "5+3",
 };
 
@@ -159,12 +171,10 @@ export default function LiveApp({ tournamentId, basePath }) {
         <p>
           <strong>{payload.name}</strong> finished.
           {payload.candidate_wins != null &&
-            ` Final: ${payload.candidate_wins}-${payload.draws}-${payload.candidate_losses} W-D-L · Δ Elo (A−B) ${eloDeltaText(
-              matchEloDelta(
-                payload.candidate_wins,
-                payload.draws,
-                payload.candidate_losses
-              )
+            ` Final: ${payload.candidate_wins}-${payload.draws}-${payload.candidate_losses} W-D-L · Δ Elo (A−B) ${eloDeltaLabel(
+              payload.candidate_wins,
+              payload.draws,
+              payload.candidate_losses
             )}.`}
         </p>
         <p>

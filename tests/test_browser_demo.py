@@ -1000,7 +1000,7 @@ def test_browser_match_filters(settings, engine_factory, registered):
             assert visible_count() == 1
             click_filter("Draws")
             assert visible_count() == 1
-            click_filter("Analyzed")
+            click_filter("Diagnostics")
             assert visible_count() == 1
             click_filter("All")
             assert visible_count() == 3

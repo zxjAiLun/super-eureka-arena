@@ -14,7 +14,7 @@
   </div>
   <div>
     <span class="muted">Δ Elo (A−B)</span><br>
-    <strong>{{ match.elo_delta|elo_delta_text }}</strong>
+    <strong>{{ elo_delta_label(match.candidate_wins, match.draws, match.candidate_losses) }}</strong>
   </div>
 </div>
 <table class="match-meta">
@@ -34,10 +34,10 @@
   <button type="button" class="gf active" data-filter="all">All</button>
   <button type="button" class="gf" data-filter="decisive">Decisive</button>
   <button type="button" class="gf" data-filter="wins">Wins</button>
-  <button type="button" class="gf" data-filter="losses">Losses</button>
   <button type="button" class="gf" data-filter="draws">Draws</button>
-  <button type="button" class="gf" data-filter="analyzed">Analyzed</button>
-  <span class="muted gf-counts">Wins/Losses/Draws are from Engine A (candidate) perspective.</span>
+  <button type="button" class="gf" data-filter="losses">Losses</button>
+  <button type="button" class="gf" data-filter="analyzed">Diagnostics</button>
+  <span class="muted gf-counts">W-D-L filters use the Engine A perspective.</span>
 </div>
 <table class="match-table">
   <thead>
@@ -90,7 +90,7 @@
       if (r.getAttribute('data-candidate-loss') === '1') c.losses += 1;
       if (r.getAttribute('data-analyzed') === '1') c.analyzed += 1;
     });
-    var labels = { all: 'All', decisive: 'Decisive', wins: 'Wins', losses: 'Losses', draws: 'Draws', analyzed: 'Analyzed' };
+    var labels = { all: 'All', decisive: 'Decisive', wins: 'Wins', draws: 'Draws', losses: 'Losses', analyzed: 'Diagnostics' };
     buttons.forEach(function (b) {
       b.textContent = labels[b.getAttribute('data-filter')] + ' ' + c[b.getAttribute('data-filter')];
     });
