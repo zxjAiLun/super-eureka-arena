@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · {{ version.version_id }}{% endblock %}
+{% block content %}
+<p><a href="{{ settings.base_path }}/admin/versions/">&larr; All versions</a></p>
+<h1>{{ version.display_name }}</h1>
+<p class="muted"><code>{{ version.version_id }}</code></p>
+
+<section class="panel">
+  <h3>Immutable identity</h3>
+  <dl class="result-grid">
+    <dt>Build</dt><dd><code>{{ version.build_id }}</code></dd>
+    <dt>Source SHA</dt><dd><code>{{ version.source_sha }}</code></dd>
+    <dt>Binary SHA</dt><dd><code>{{ version.binary_sha256 }}</code></dd>
+    <dt>Command args</dt><dd><code>{{ version.command_args|join(" ") or "—" }}</code></dd>
+    <dt>UCI options</dt><dd><code>{{ version.uci_options }}</code></dd>
+    <dt>Identity fingerprint</dt><dd><code>{{ version.identity_fingerprint }}</code></dd>
+    <dt>Status</dt><dd><span class="status status-{{ version.status }}">{{ version.status }}</span></dd>
+    <dt>Channels</dt>
+    <dd>{% for ch in channels %}<code>{{ ch }}</code>{% if not loop.last %}, {% endif %}{% else %}&mdash;{% endfor %}</dd>
+    <dt>Rated / public</dt><dd>{{ "yes" if version.rating_enabled else "no" }} / {{ "yes" if version.public_visible else "no" }}</dd>
+    <dt>Created</dt><dd>{{ version.created_at|dt }}</dd>
+    {% if build %}
+    <dt>Build registered</dt><dd>{{ "yes" if build.enabled else "DISABLED" }}</dd>
+    {% endif %}
+  </dl>
+  <p class="muted">Immutable fields cannot be edited — recreate a version with a
+    new version_id for a different configuration.</p>
+</section>
+
+<section class="panel">
+  <h3>Current ratings by time control</h3>
+  {% if ratings_rows %}
+  <table class="match-table">
+    <thead>
+      <tr><th>TC</th><th>Elo</th><th>Games</th><th>W-D-L</th><th>Status</th></tr>
+    </thead>
+    <tbody>
+      {% for r in ratings_rows %}
+      <tr>
+        <td>{{ r.tc|tc_label }}</td>
+        <td>{{ r.rating }}</td>
+        <td>{{ r.games }}</td>
+        <td>{{ r.wins }}-{{ r.draws }}-{{ r.losses }}</td>
+        <td>{{ r.status }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No rated history in any pool yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h3>Match history</h3>
+  {% if history %}
+  <table class="match-table">
+    <thead>
+      <tr><th>Match</th><th>TC</th><th>Status</th><th>Finished</th></tr>
+    </thead>
+    <tbody>
+      {% for t in history %}
+      <tr>
+        <td><a href="{{ settings.base_path }}/admin/tournaments/{{ t.id }}">{{ t.name }}</a></td>
+        <td>{{ t.time_control|tc_label }}</td>
+        <td><span class="status status-{{ t.status|lower }}">{{ t.status }}</span></td>
+        <td>{{ t.finished_at|dt }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No matches used this version yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

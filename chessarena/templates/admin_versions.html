@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · EngineVersions{% endblock %}
+{% block content %}
+<h1>EngineVersions</h1>
+<p class="muted">
+  Permanent immutable chess identities (version == Elo participant). Immutable
+  fields are snapshotted at creation; only display/status metadata could ever
+  change — there is no edit surface for identity.
+</p>
+
+{% if versions %}
+<table class="match-table">
+  <thead>
+    <tr>
+      <th>Version</th><th>Status</th><th>Build</th><th>Source SHA</th>
+      <th>Binary SHA</th><th>Command args</th><th>Channel(s)</th>
+      <th>Created</th><th>Rated</th><th>Public</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for v in versions %}
+    <tr>
+      <td>
+        <a href="{{ settings.base_path }}/admin/versions/{{ v.version_id }}">
+          {{ v.display_name }}<br><code>{{ v.version_id }}</code>
+        </a>
+      </td>
+      <td><span class="status status-{{ v.status }}">{{ v.status }}</span></td>
+      <td><code>{{ v.build_id }}</code></td>
+      <td><code>{{ v.source_sha[:12] }}</code></td>
+      <td><code>{{ v.binary_sha256[:12] }}</code></td>
+      <td><code>{{ v.command_args|join(" ") or "—" }}</code></td>
+      <td>
+        {% for ch in v.channels %}<code>{{ ch }}</code>{% if not loop.last %}, {% endif %}{% else %}&mdash;{% endfor %}
+      </td>
+      <td>{{ v.created_at|dt }}</td>
+      <td>{{ "yes" if v.rating_enabled else "no" }}</td>
+      <td>{{ "yes" if v.public_visible else "no" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No EngineVersions registered yet.</p>
+{% endif %}
+{% endblock %}
