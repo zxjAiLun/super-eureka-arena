@@ -481,10 +481,24 @@ def test_same_fingerprint_self_play_never_counts(
 
 
 def test_history_only_participant_scoped_to_its_pool(
-    engine_factory, tournament_factory
+    engine_factory, tournament_factory, registered
 ):
-    """P4.12 repair: an archived/history-only fingerprint appears ONLY in the
-    pool where it has rated history — never as an 1800 ghost in other pools."""
+    """P4.12 repair: an archived/history-only identity appears ONLY in the
+    pool where it has rated history — never as an 1800 ghost in other pools.
+    S4.3E Phase 1: public zero-game participants come from EngineVersion."""
+    import json
+
+    from chessarena.services import versions
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    with engine_factory() as session:
+        versions.create_version_from_build(
+            session, version_id="ce-public-v1", display_name="ChessEngine Production",
+            build_id=manifest["build_id"], command_args=[],
+            status="production",
+        )
     ghost = {
         "preset_id": "archived-engine",
         "display_name": "Archived Engine",
@@ -508,6 +522,8 @@ def test_history_only_participant_scoped_to_its_pool(
         "history-only participant must not ghost into the bullet pool"
     )
     assert "Archived Engine" not in rapid
-    # Public participants still show in every pool even with zero games.
-    assert "ChessEngine Legacy Baseline" in bullet
-    assert "ChessEngine Legacy Baseline" in rapid
+    # Public EngineVersion participants show in every pool even with zero games.
+    assert "ChessEngine Production" in bullet
+    assert "ChessEngine Production" in rapid
+    assert bullet["ChessEngine Production"]["games"] == 0
+    assert bullet["ChessEngine Production"]["status"] == "initial"
