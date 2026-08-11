@@ -523,26 +523,41 @@ def public_ratings(
     pools = {key: tc_label(key) for key in TIME_CONTROLS}
     selected = tc if tc in pools else "blitz_3_2"
     rows = all_ratings.get(selected, {"engines": [], "anchors": []})
-    engines = [
-        {
-            "display_name": e["display_name"],
-            "rating": e["rating"],
-            "games": e["games"],
-            "wins": e["wins"],
-            "draws": e["draws"],
-            "losses": e["losses"],
-            "status": e["status"],
-        }
-        for e in rows["engines"]
-    ]
-    # S4.3E Phase 1: version catalog + channel mapping on the public page.
-    versions = session.query(EngineVersion).order_by(
-        EngineVersion.created_at.asc()
-    ).all()
+    # S4.3E Phase 1: channel mapping for the EngineVersion identity columns.
     channels = session.query(EngineChannel).order_by(
         EngineChannel.channel_id.asc()
     ).all()
     channel_map = {c.engine_version_id: c.channel_id for c in channels}
+    engines = []
+    for e in rows["engines"]:
+        pid = e.get("participant_id") or ""
+        if e["status"] == "fixed":
+            version_id = None
+            identity = None
+        elif pid.startswith("legacy:"):
+            version_id = None
+            identity = pid
+        else:
+            version_id = pid
+            identity = None
+        engines.append(
+            {
+                "display_name": e["display_name"],
+                "rating": e["rating"],
+                "games": e["games"],
+                "wins": e["wins"],
+                "draws": e["draws"],
+                "losses": e["losses"],
+                "status": e["status"],
+                "version_id": version_id,
+                "identity": identity,
+                "channel": channel_map.get(version_id),
+            }
+        )
+    # S4.3E Phase 1: version catalog + channel mapping on the public page.
+    versions = session.query(EngineVersion).order_by(
+        EngineVersion.created_at.asc()
+    ).all()
     version_rows = [
         {
             "version_id": v.version_id,

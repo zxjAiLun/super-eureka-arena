@@ -320,6 +320,50 @@ def test_ratings_page_public_whitelist(app_client, settings, engine_factory,
     assert "3+2" in body and "5+3" in body
 
 
+def test_ratings_catalog_rendered_once_in_content(app_client, settings,
+                                                  engine_factory,
+                                                  tournament_factory):
+    """P4.12/EngineVersion follow-up: the EngineVersions catalog must render
+    exactly ONCE, inside the content block — never inside the <title>."""
+    _completed(settings, engine_factory, tournament_factory, "rated-ia2",
+               wins=1, draws=1, losses=1, arena_elo_enabled=True,
+               anchor_vs_engine=True)
+    # Register a real EngineVersion so the catalog TABLE path is exercised.
+    from chessarena.services import versions
+
+    with engine_factory() as session:
+        from chessarena.models import EngineBuild
+
+        build = (
+            session.query(EngineBuild)
+            .filter(EngineBuild.build_id.isnot(None))
+            .first()
+        )
+        versions.create_version_from_build(
+            session, version_id="ce-test-20260811",
+            display_name="Test Version", build_id=build.build_id,
+            status="production",
+        )
+    r = app_client.get("/chessarena/ratings/")
+    assert r.status_code == 200
+    body = r.text
+    # Exactly one catalog section heading; its table (Identity/Build/Channel
+    # header set) appears only once.
+    assert body.count("<h2>EngineVersions</h2>") == 1, (
+        "the EngineVersions catalog must render exactly once"
+    )
+    assert body.count("<th>Identity</th>") == 1
+    assert body.count("<th>Build</th>") == 1
+    # The version appears in the catalog AND as the participant's identity
+    # column in the main ratings table (S4.3E identity display contract).
+    assert body.count("ce-test-20260811") >= 1
+    # The <title> element is a plain page title: no headings/tables inside.
+    title = body.split("<title>")[1].split("</title>")[0]
+    assert title == "ChessArena — Ratings", repr(title)
+    for markup in ("<h2", "<table", "<p", "<tr"):
+        assert markup not in title, f"title block polluted with {markup}"
+
+
 def test_admin_ratings_redirects_to_public(app_client):
     r = app_client.get("/chessarena/admin/ratings", follow_redirects=False)
     assert r.status_code == 303
