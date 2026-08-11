@@ -118,7 +118,7 @@ def test_browser_preset_editor_flow(settings, engine_factory, registered):
 
             # Redirect lands on the New Match page; the preset is selectable.
             assert "/admin/tournaments/new" in page.url
-            assert page.locator('select[name="engine_a_preset"] option', has_text="Browser Strength").count() == 1
+            assert page.locator('select[name="engine_a_side"] option', has_text="Browser Strength").count() == 1
 
             assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()

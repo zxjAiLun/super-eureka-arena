@@ -27,8 +27,8 @@ def _norm(html: str) -> str:
 def test_new_match_renders_form(app_client):
     r = app_client.get(NEW)
     assert r.status_code == 200
-    assert 'name="engine_a_preset"' in r.text
-    assert 'name="engine_b_preset"' in r.text
+    assert 'name="engine_a_side"' in r.text
+    assert 'name="engine_b_side"' in r.text
     assert 'name="opening_set_id"' in r.text
     assert 'name="time_control"' in r.text
     assert 'name="pairs"' in r.text
@@ -37,8 +37,8 @@ def test_new_match_renders_form(app_client):
 def test_new_match_prefill_from_query(app_client):
     r = app_client.get(
         NEW
-        + "?engine_a_preset=chessengine-production"
-        + "&engine_b_preset=chessengine-legacy-current"
+        + "?engine_a_side=preset:chessengine-production"
+        + "&engine_b_side=preset:chessengine-legacy-current"
         + "&opening_set_id=test-openings-v1"
         + "&opening_plies=12&time_control=rapid_5_3&pairs=4"
     )
@@ -55,8 +55,8 @@ def test_new_match_uses_last_used_prefs(settings, app_client):
     tournaments_api._save_match_prefs(
         settings,
         {
-            "engine_a_preset": "chessengine-production",
-            "engine_b_preset": "chessengine-legacy-current",
+            "engine_a_side": "preset:chessengine-production",
+            "engine_b_side": "preset:chessengine-legacy-current",
             "opening_set_id": "test-openings-v1",
             "opening_plies": "14",
             "time_control": "bullet_1_0",
@@ -93,7 +93,7 @@ def test_completed_match_summary_and_run_again(
     assert "Run again" in r.text
     assert "Delete match" in r.text
     # Run again prefills the original match parameters into new-match.
-    assert f"/admin/tournaments/new?engine_a_preset=" in r.text
+    assert f"/admin/tournaments/new?engine_a_side=" in r.text
     assert "opening_set_id=test-openings-v1" in r.text
     assert "pairs=8" in r.text
 

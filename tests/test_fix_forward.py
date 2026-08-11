@@ -413,8 +413,8 @@ def test_admin_form_without_csrf_token_is_403(app_client):
     opening = app_client.get("/chessarena/api/v1/opening-sets").json()[0]
     payload = {
         "name": "csrf",
-        "engine_a_preset": "chessengine-production",
-        "engine_b_preset": "chessengine-legacy-current",
+        "engine_a_side": "preset:chessengine-production",
+        "engine_b_side": "preset:chessengine-legacy-current",
         "opening_set_id": opening["opening_set_id"],
         "time_control": "blitz_3_2",
         "pairs": 2,
@@ -435,8 +435,8 @@ def test_admin_form_with_csrf_token_works(app_client):
     opening = app_client.get("/chessarena/api/v1/opening-sets").json()[0]
     payload = {
         "name": "csrf-ok",
-        "engine_a_preset": "chessengine-production",
-        "engine_b_preset": "chessengine-legacy-current",
+        "engine_a_side": "preset:chessengine-production",
+        "engine_b_side": "preset:chessengine-legacy-current",
         "opening_set_id": opening["opening_set_id"],
         "time_control": "blitz_3_2",
         "pairs": 2,

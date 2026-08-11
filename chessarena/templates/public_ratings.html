@@ -1,5 +1,31 @@
 {% extends "public_base.html" %}
-{% block title %}ChessArena — Ratings{% endblock %}
+{% block title %}ChessArena — Ratings
+<h2>EngineVersions</h2>
+<p class="muted">
+  Permanent immutable chess identities (version == Elo participant). The
+  <code>CurrentFinal</code> channel points at the current production version.
+</p>
+{% if versions %}
+<table class="match-table">
+  <thead>
+    <tr><th>Version</th><th>Identity</th><th>Status</th><th>Build</th><th>Channel</th></tr>
+  </thead>
+  <tbody>
+    {% for v in versions %}
+    <tr>
+      <td>{{ v.display_name }}</td>
+      <td><code>{{ v.version_id }}</code></td>
+      <td><span class="status status-{{ v.status }}">{{ v.status }}</span></td>
+      <td><code>{{ v.build_id }}</code></td>
+      <td>{% if v.channel %}<code>{{ v.channel }}</code>{% else %}&mdash;{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No EngineVersions registered yet.</p>
+{% endif %}
+{% endblock %}
 {% block content %}
 <h1>Arena Ratings</h1>
 <p class="muted">
@@ -48,5 +74,31 @@
 </table>
 {% else %}
 <p class="muted">No participants in this pool yet.</p>
+{% endif %}
+
+<h2>EngineVersions</h2>
+<p class="muted">
+  Permanent immutable chess identities (version == Elo participant). The
+  <code>CurrentFinal</code> channel points at the current production version.
+</p>
+{% if versions %}
+<table class="match-table">
+  <thead>
+    <tr><th>Version</th><th>Identity</th><th>Status</th><th>Build</th><th>Channel</th></tr>
+  </thead>
+  <tbody>
+    {% for v in versions %}
+    <tr>
+      <td>{{ v.display_name }}</td>
+      <td><code>{{ v.version_id }}</code></td>
+      <td><span class="status status-{{ v.status }}">{{ v.status }}</span></td>
+      <td><code>{{ v.build_id }}</code></td>
+      <td>{% if v.channel %}<code>{{ v.channel }}</code>{% else %}&mdash;{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No EngineVersions registered yet.</p>
 {% endif %}
 {% endblock %}

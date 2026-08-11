@@ -10,14 +10,24 @@
   </label>
 
   <h3>Engine A</h3>
-  <label>Preset
-    <select name="engine_a_preset" required>
-      {% for p in presets %}
-        <option value="{{ p.preset_id }}"
-          {% if p.preset_id == (defaults.engine_a_preset or "chessengine-production") %}selected{% endif %}>
-          {{ p.display_name }} ({{ p.build_id }})
-        </option>
-      {% endfor %}
+  <label>Side
+    <select name="engine_a_side" required>
+      <optgroup label="EngineVersions (stable rated identity)">
+        {% for v in versions %}
+          <option value="version:{{ v.version_id }}"
+            {% if (defaults.engine_a_preset or '') == ('version:' + v.version_id) %}selected{% endif %}>
+            {{ v.display_name }} — {{ v.version_id }} ({{ v.status }})
+          </option>
+        {% endfor %}
+      </optgroup>
+      <optgroup label="Presets (experimental launch templates)">
+        {% for p in presets %}
+          <option value="preset:{{ p.preset_id }}"
+            {% if (defaults.engine_a_preset or '') in ('preset:' + p.preset_id, p.preset_id) %}selected{% endif %}>
+            {{ p.display_name }} ({{ p.build_id }})
+          </option>
+        {% endfor %}
+      </optgroup>
     </select>
   </label>
   <label id="elo-a-wrap" class="custom-elo" style="display:none">Custom Elo (optional) <span class="muted">— per-match override, no preset is created</span>
@@ -27,14 +37,24 @@
   </label>
 
   <h3>Engine B</h3>
-  <label>Preset
-    <select name="engine_b_preset" required>
-      {% for p in presets %}
-        <option value="{{ p.preset_id }}"
-          {% if p.preset_id == (defaults.engine_b_preset or "chessengine-legacy-current") %}selected{% endif %}>
-          {{ p.display_name }} ({{ p.build_id }})
-        </option>
-      {% endfor %}
+  <label>Side
+    <select name="engine_b_side" required>
+      <optgroup label="EngineVersions (stable rated identity)">
+        {% for v in versions %}
+          <option value="version:{{ v.version_id }}"
+            {% if (defaults.engine_b_preset or '') == ('version:' + v.version_id) %}selected{% endif %}>
+            {{ v.display_name }} — {{ v.version_id }} ({{ v.status }})
+          </option>
+        {% endfor %}
+      </optgroup>
+      <optgroup label="Presets (experimental launch templates)">
+        {% for p in presets %}
+          <option value="preset:{{ p.preset_id }}"
+            {% if (defaults.engine_b_preset or '') in ('preset:' + p.preset_id, p.preset_id) %}selected{% endif %}>
+            {{ p.display_name }} ({{ p.build_id }})
+          </option>
+        {% endfor %}
+      </optgroup>
     </select>
   </label>
   <label id="elo-b-wrap" class="custom-elo" style="display:none">Custom Elo (optional) <span class="muted">— per-match override, no preset is created</span>
@@ -43,8 +63,8 @@
     <span class="muted" id="elo-b-range"></span>
   </label>
 
-  <p id="same-preset-warning" class="danger" style="display:none">
-    Warning: both sides use the same engine preset.
+  <p id="same-side-warning" class="danger" style="display:none">
+    Warning: both sides use the same engine side.
   </p>
   <label style="display:none" id="allow-selfplay-wrap">
     <input type="checkbox" name="allow_intentional_self_play">
@@ -90,9 +110,9 @@
 <script>
 (function () {
   var PRESET_ELO = {{ preset_elo | tojson }};
-  var a = document.querySelector('select[name="engine_a_preset"]');
-  var b = document.querySelector('select[name="engine_b_preset"]');
-  var warn = document.getElementById('same-preset-warning');
+  var a = document.querySelector('select[name="engine_a_side"]');
+  var b = document.querySelector('select[name="engine_b_side"]');
+  var warn = document.getElementById('same-side-warning');
   var wrap = document.getElementById('allow-selfplay-wrap');
 
   function eloEls(side) {
@@ -102,12 +122,20 @@
       range: document.getElementById('elo-' + side + '-range'),
     };
   }
-  function refreshElo(side, presetId) {
+  function presetIdOf(sideValue) {
+    // "preset:<id>" -> id; "version:<id>" -> null (versions reject custom Elo).
+    if (sideValue && sideValue.indexOf('preset:') === 0) {
+      return sideValue.slice('preset:'.length);
+    }
+    return null;
+  }
+  function refreshElo(side, sideValue) {
+    var presetId = presetIdOf(sideValue);
     var limit = PRESET_ELO[presetId];
     var els = eloEls(side);
-    if (!limit) {
-      // Unsupported preset: hide, clear and disable so a stale value can
-      // never be submitted (the backend would otherwise 422 on a hidden Elo).
+    if (!presetId || !limit) {
+      // Version side or unsupported preset: hide, clear and disable so a
+      // stale value can never be submitted.
       els.wrap.style.display = 'none';
       els.input.disabled = true;
       els.input.value = '';

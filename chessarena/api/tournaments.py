@@ -40,7 +40,9 @@ from ..models import (
     SPRT_ACCEPT_H1,
     SPRT_MAX_PAIRS,
     EngineBuild,
+    EngineChannel,
     EnginePreset,
+    EngineVersion,
     Event,
     Game,
     OpeningSet,
@@ -920,8 +922,14 @@ def _new_match_defaults(session, settings, query: dict) -> dict:
         or (DEFAULT_OPENING if DEFAULT_OPENING in enabled_openings else None)
     )
     return {
-        "engine_a_preset": query.get("engine_a_preset") or prefs.get("engine_a_preset"),
-        "engine_b_preset": query.get("engine_b_preset") or prefs.get("engine_b_preset"),
+        "engine_a_preset": query.get("engine_a_side")
+        or query.get("engine_a_preset")
+        or prefs.get("engine_a_side")
+        or prefs.get("engine_a_preset"),
+        "engine_b_preset": query.get("engine_b_side")
+        or query.get("engine_b_preset")
+        or prefs.get("engine_b_side")
+        or prefs.get("engine_b_preset"),
         "opening_set_id": opening,
         "opening_plies": query.get("opening_plies")
         or prefs.get("opening_plies")
@@ -972,11 +980,18 @@ def admin_tournament_new(request: Request, session: Session = Depends(get_db)):
         p.preset_id: _preset_elo_limits(builds.get(p.build_id))
         for p in presets
     }
+    versions = (
+        session.query(EngineVersion)
+        .filter(EngineVersion.public_visible.is_(True))
+        .order_by(EngineVersion.created_at.desc())
+        .all()
+    )
     return templates.TemplateResponse(
         request,
         "tournament_new.html",
         {
             "presets": presets,
+            "versions": versions,
             "openings": openings,
             "time_controls": TIME_CONTROLS,
             "defaults": defaults,
@@ -986,28 +1001,31 @@ def admin_tournament_new(request: Request, session: Session = Depends(get_db)):
     )
 
 
+def _parse_admin_side(form: dict, side: str) -> dict:
+    """Parse the combined side selector value ("preset:<id>" or
+    "version:<id>"; bare ids are treated as legacy presets)."""
+    raw = str(form.get(f"engine_{side}_side") or "")
+    if raw.startswith("version:"):
+        return {"version_id": raw[len("version:") :]}
+    preset_id = raw[len("preset:") :] if raw.startswith("preset:") else raw
+    return {
+        "preset_id": preset_id,
+        "custom_elo": (
+            int(form.get(f"engine_{side}_elo") or "")
+            if str(form.get(f"engine_{side}_elo") or "").strip()
+            else None
+        ),
+    }
+
+
 @admin_router.post("/admin/tournaments", response_class=RedirectResponse)
 async def admin_tournament_create(request: Request, session: Session = Depends(get_db)):
     form = dict(await request.form())
     validate_csrf_token(request, form)
     body = TournamentCreate(
         name=form["name"],
-        engine_a={
-            "preset_id": form["engine_a_preset"],
-            "custom_elo": (
-                int(form["engine_a_elo"])
-                if form.get("engine_a_elo", "").strip()
-                else None
-            ),
-        },
-        engine_b={
-            "preset_id": form["engine_b_preset"],
-            "custom_elo": (
-                int(form["engine_b_elo"])
-                if form.get("engine_b_elo", "").strip()
-                else None
-            ),
-        },
+        engine_a=_parse_admin_side(form, "a"),
+        engine_b=_parse_admin_side(form, "b"),
         opening_set_id=form["opening_set_id"],
         time_control=form["time_control"],
         pairs=int(form["pairs"]),
@@ -1032,8 +1050,8 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
     _save_match_prefs(
         request.app.state.settings,
         {
-            "engine_a_preset": form["engine_a_preset"],
-            "engine_b_preset": form["engine_b_preset"],
+            "engine_a_side": str(form.get("engine_a_side") or ""),
+            "engine_b_side": str(form.get("engine_b_side") or ""),
             "opening_set_id": form["opening_set_id"],
             "opening_plies": form.get("opening_plies") or "",
             "time_control": form["time_control"],
@@ -1097,10 +1115,20 @@ def admin_tournament_detail(
         tournament.engine_b_profile,
     )
 
+    # Run again emits side keys so EngineVersion tournaments replay as
+    # versions ("version:<id>"), preset tournaments as presets.
+    def _side_param(side, preset_id):
+        snap = (tournament.config_snapshot or {}).get(side) or {}
+        if snap.get("version_id"):
+            return f"version:{snap['version_id']}"
+        if preset_id:
+            return f"preset:{preset_id}"
+        return ""
+
     run_again = (
         f"{bp}/admin/tournaments/new?"
-        f"engine_a_preset={tournament.engine_a_preset_id or ''}"
-        f"&engine_b_preset={tournament.engine_b_preset_id or ''}"
+        f"engine_a_side={_side_param('engine_a', tournament.engine_a_preset_id)}"
+        f"&engine_b_side={_side_param('engine_b', tournament.engine_b_preset_id)}"
         f"&opening_set_id={tournament.opening_set_id}"
         f"&opening_plies={opening_plies or ''}"
         f"&time_control={tournament.time_control}"

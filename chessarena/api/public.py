@@ -515,6 +515,7 @@ def public_ratings(
     Only whitelisted display fields reach the template — never fingerprints,
     build ids, SHAs or server paths."""
     from ..config import TIME_CONTROLS
+    from ..models import EngineChannel, EngineVersion
     from ..services.display import tc_label
     from ..services.ratings import compute_ratings
 
@@ -534,6 +535,25 @@ def public_ratings(
         }
         for e in rows["engines"]
     ]
+    # S4.3E Phase 1: version catalog + channel mapping on the public page.
+    versions = session.query(EngineVersion).order_by(
+        EngineVersion.created_at.asc()
+    ).all()
+    channels = session.query(EngineChannel).order_by(
+        EngineChannel.channel_id.asc()
+    ).all()
+    channel_map = {c.engine_version_id: c.channel_id for c in channels}
+    version_rows = [
+        {
+            "version_id": v.version_id,
+            "display_name": v.display_name,
+            "status": v.status,
+            "build_id": v.build_id,
+            "channel": channel_map.get(v.version_id),
+        }
+        for v in versions
+        if v.public_visible and v.rating_enabled
+    ]
     return _render(
         request,
         "public_ratings.html",
@@ -542,6 +562,7 @@ def public_ratings(
         selected_tc=selected,
         engines=engines,
         anchors=rows["anchors"],
+        versions=version_rows,
     )
 
 

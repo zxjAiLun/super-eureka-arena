@@ -1101,20 +1101,20 @@ def test_browser_custom_elo_hidden_input_cleared(settings, engine_factory, regis
 
             elo_input = page.locator('input[name="engine_b_elo"]')
             # Select an Elo-capable preset, type a custom Elo.
-            page.select_option('select[name="engine_b_preset"]', "chessengine-legacy-current")
+            page.select_option('select[name="engine_b_side"]', "preset:chessengine-legacy-current")
             page.wait_for_timeout(150)
             assert elo_input.is_visible()
             elo_input.fill("1850")
 
             # Switch to a preset without UCI_Elo: input hidden, cleared, disabled.
-            page.select_option('select[name="engine_b_preset"]', "no-elo-preset")
+            page.select_option('select[name="engine_b_side"]', "preset:no-elo-preset")
             page.wait_for_timeout(150)
             assert not elo_input.is_visible()
             assert elo_input.input_value() == ""
             assert elo_input.is_disabled()
 
             # Switching back re-enables it.
-            page.select_option('select[name="engine_b_preset"]', "chessengine-legacy-current")
+            page.select_option('select[name="engine_b_side"]', "preset:chessengine-legacy-current")
             page.wait_for_timeout(150)
             assert elo_input.is_visible()
             assert not elo_input.is_disabled()
