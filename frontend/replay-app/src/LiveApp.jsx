@@ -158,6 +158,12 @@ export default function LiveApp({ tournamentId, basePath }) {
     );
   }
   if (phase === "completed") {
+    // CONTINUE is the running SPRT state, not a final result: only a real
+    // terminal decision (ACCEPT_H1 / ACCEPT_H0 / MAX_PAIRS) renders as the
+    // "SPRT result" block.  A FAILED/CANCELLED SPRT match must not label its
+    // last pre-termination state as a result.
+    const hasFinalSprt =
+      payload.sprt && payload.sprt.decision !== "CONTINUE";
     return (
       <div className="demo-message">
         <p>
@@ -169,7 +175,7 @@ export default function LiveApp({ tournamentId, basePath }) {
               payload.candidate_losses
             )}.`}
         </p>
-        {payload.sprt && (
+        {hasFinalSprt && (
           <div className="analysis-panel" style={{ textAlign: "left" }}>
             <div className="analysis-score">SPRT result</div>
             <SprtSummary sprt={payload.sprt} />

@@ -2142,10 +2142,35 @@ def test_browser_live_match_summary_and_sprt(
                 assert forbidden not in body
             assert not console_errors, f"browser console errors: {console_errors}"
 
+            # P2: a FAILED/CANCELLED SPRT match must NOT label its last
+            # pre-termination state (CONTINUE) as an "SPRT result", and must
+            # not link to a replay.
+            from chessarena.models import Tournament as _Tournament
+            from chessarena.models import CANCELLED
+
+            with engine_factory() as session:
+                t = session.query(_Tournament).filter(
+                    _Tournament.id == tid
+                ).one()
+                t.status = CANCELLED
+                t.finished_at = utcnow()
+                session.commit()
+            page.wait_for_function(
+                """() => document.body.innerText.includes('finished')""",
+                timeout=30000,
+            )
+            cancelled_body = page.locator("body").inner_text()
+            assert "finished" in cancelled_body
+            assert "SPRT result" not in cancelled_body, (
+                "CONTINUE must not render as an SPRT result"
+            )
+            assert "Open completed match replay" not in cancelled_body, (
+                "cancelled match must have no replay link"
+            )
+
             # The match reaches a terminal SPRT decision: the completed page
             # must STILL render the final SPRT result (P2: the early-return
             # completed branch must not drop payload.sprt).
-            from chessarena.models import Tournament as _Tournament
             from chessarena.models import SPRT_ACCEPT_H1
 
             with engine_factory() as session:
@@ -2174,7 +2199,7 @@ def test_browser_live_match_summary_and_sprt(
                 encoding="utf-8",
             )
             page.wait_for_function(
-                """() => document.body.innerText.includes('finished')""",
+                """() => document.body.innerText.includes('SPRT result')""",
                 timeout=30000,
             )
             done = page.locator("body").inner_text()
