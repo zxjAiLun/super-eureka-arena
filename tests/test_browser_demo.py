@@ -2141,6 +2141,53 @@ def test_browser_live_match_summary_and_sprt(
             for forbidden in ("binary_sha", "schema_version"):
                 assert forbidden not in body
             assert not console_errors, f"browser console errors: {console_errors}"
+
+            # The match reaches a terminal SPRT decision: the completed page
+            # must STILL render the final SPRT result (P2: the early-return
+            # completed branch must not drop payload.sprt).
+            from chessarena.models import Tournament as _Tournament
+            from chessarena.models import SPRT_ACCEPT_H1
+
+            with engine_factory() as session:
+                t = session.query(_Tournament).filter(
+                    _Tournament.id == tid
+                ).one()
+                t.status = SPRT_ACCEPT_H1
+                t.finished_at = utcnow()
+                session.commit()
+            # The real scheduler writes the terminal decision into sprt.json;
+            # mirror that so the payload carries ACCEPT_H1.
+            import json as _json2
+
+            sprt_path = settings.run_root / tid / "sprt.json"
+            sprt_path.write_text(
+                _json2.dumps({
+                    "schema_version": 1,
+                    "tournament_id": tid,
+                    "elo_model": "logistic", "elo0": 0, "elo1": 30,
+                    "alpha": 0.05, "beta": 0.05,
+                    "lower_bound": -2.944, "upper_bound": 2.944,
+                    "pairs": 67, "games": 134,
+                    "ptnml": [10, 20, 30, 40, 34],
+                    "llr": 2.976, "decision": "ACCEPT_H1",
+                }),
+                encoding="utf-8",
+            )
+            page.wait_for_function(
+                """() => document.body.innerText.includes('finished')""",
+                timeout=30000,
+            )
+            done = page.locator("body").inner_text()
+            assert "SPRT result" in done, (
+                "completed page must render the SPRT block"
+            )
+            assert "ACCEPT_H1" in done, done[:300]
+            assert "LLR 2.976" in done
+            assert "-2.944 / 2.944" in done
+            assert "H0 0 Elo · H1 30 Elo" in done
+            assert "Ptnml [10, 20, 30, 40, 34]" in done
+            assert "Open completed match replay" in done
+            assert not console_errors, f"browser console errors: {console_errors}"
             browser.close()
     finally:
         proc.terminate()

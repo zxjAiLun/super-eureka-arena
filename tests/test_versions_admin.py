@@ -96,6 +96,51 @@ def test_admin_version_detail(app_client, engine_factory, tournament_factory,
     ) or "method=\"post\"" not in body
 
 
+def test_admin_version_detail_matches_legacy_fingerprint(
+        app_client, engine_factory, tournament_factory, registered):
+    """P2: a legacy snapshot WITHOUT version_id whose frozen fingerprint
+    uniquely matches the EngineVersion must be listed in its match history —
+    exactly like it counts toward the version's Elo/Games/W-D-L."""
+    _register_build(engine_factory)
+    with engine_factory() as session:
+        v = versions.create_version_from_build(
+            session, version_id="ce-test-20260811",
+            display_name="CurrentFinal · Test · 2026-08-11",
+            build_id="20260811-26604c4-linux-x86_64",
+            status="production",
+        )
+        fingerprint = v.identity_fingerprint
+        tid = tournament_factory(name="legacy-fp-match", pairs=1,
+                                 time_control="blitz_3_2", status=COMPLETED)
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        t.completed_pairs = 1
+        t.finished_at = utcnow()
+        snap = dict(t.config_snapshot or {})
+        # NO version_id: the frozen identity must resolve via fingerprint.
+        snap["engine_a"] = {
+            "preset_id": "chessengine-production",
+            "display_name": "CurrentFinal",
+            "build_id": "20260811-26604c4-linux-x86_64",
+            "command_args": [],
+            "uci_options": {},
+            "git_sha": "26604c425625d69e5b7e7b967db8926f4da01b8a",
+            "binary_sha256": "f0e8f91a3a0828a158672cecdf7859dbd9a3c9bac36b965bdcc90db31b51189d",
+        }
+        t.config_snapshot = snap
+        session.commit()
+        assert fingerprint == versions.identity_fingerprint(
+            "f0e8f91a3a0828a158672cecdf7859dbd9a3c9bac36b965bdcc90db31b51189d",
+            [], {},
+        )
+    r = app_client.get("/chessarena/admin/versions/ce-test-20260811")
+    assert r.status_code == 200
+    body = r.text
+    assert "legacy-fp-match" in body, (
+        "legacy fingerprint-matched matches must appear in the version's "
+        "match history"
+    )
+
+
 def test_admin_version_detail_404(app_client, engine_factory):
     r = app_client.get("/chessarena/admin/versions/not-a-version")
     assert r.status_code == 404

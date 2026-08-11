@@ -120,7 +120,26 @@ def run_backfill(session, production_build_dir: Path | None = None) -> dict:
                     .filter(EngineBuild.build_id == PRODUCTION["build_id"])
                     .first()
                 )
-                report["production_build"] = "registered " + PRODUCTION["build_id"]
+                # Fresh-install MUST re-verify the registered build against
+                # the frozen expected identity: install_build.py only proves
+                # the binary matches ITS OWN manifest, never that this is the
+                # identity ce-currentfinal-20260811 was declared with.
+                if (
+                    build is None
+                    or build.git_sha != PRODUCTION["source_sha"]
+                    or build.binary_sha256 != PRODUCTION["binary_sha256"]
+                ):
+                    report["production_build"] = (
+                        "BLOCKED: freshly registered build does not match "
+                        f"the frozen identity (git={build and build.git_sha}, "
+                        f"binary={build and build.binary_sha256[:16]}...)"
+                    )
+                    build = None  # unusable for this backfill
+                else:
+                    report["production_build"] = (
+                        "registered and verified exact "
+                        + PRODUCTION["build_id"]
+                    )
     else:
         if (
             build.git_sha != PRODUCTION["source_sha"]

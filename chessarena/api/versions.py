@@ -161,7 +161,7 @@ def admin_versions_list(request: Request, session: Session = Depends(get_db)):
 def admin_version_detail(
     version_id: str, request: Request, session: Session = Depends(get_db)
 ):
-    from ..services.ratings import compute_ratings
+    from ..services.ratings import compute_ratings, resolve_participant_id
 
     version = get_version(session, version_id)
     if version is None:
@@ -193,9 +193,15 @@ def admin_version_detail(
     history = []
     for t in matches:
         snap = t.config_snapshot or {}
+        # Use the SAME authoritative resolver as the ratings service: a
+        # legacy snapshot whose frozen fingerprint uniquely matches this
+        # EngineVersion counts as this version's history, exactly like it
+        # counts toward its Elo/Games/W-D-L.
         used = (
-            (snap.get("engine_a") or {}).get("version_id") == version_id
-            or (snap.get("engine_b") or {}).get("version_id") == version_id
+            resolve_participant_id(session, snap.get("engine_a") or {})
+            == version_id
+            or resolve_participant_id(session, snap.get("engine_b") or {})
+            == version_id
         )
         if used:
             history.append(t)

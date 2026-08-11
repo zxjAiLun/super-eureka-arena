@@ -5,6 +5,7 @@ import { shareForUi } from "./eval";
 import AnalysisPanel, {
   DEFAULT_ANALYSIS_DEPTH,
 } from "./AnalysisPanel";
+import SprtSummary from "./SprtSummary";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -168,6 +169,12 @@ export default function LiveApp({ tournamentId, basePath }) {
               payload.candidate_losses
             )}.`}
         </p>
+        {payload.sprt && (
+          <div className="analysis-panel" style={{ textAlign: "left" }}>
+            <div className="analysis-score">SPRT result</div>
+            <SprtSummary sprt={payload.sprt} />
+          </div>
+        )}
         <p>
           {payload.match_url && (
             <a href={payload.match_url} className="action-link">
@@ -297,19 +304,7 @@ export default function LiveApp({ tournamentId, basePath }) {
                 payload.candidate_losses
               )}
             </div>
-            {payload.sprt && (
-              <>
-                <div className="analysis-line">
-                  SPRT · {payload.sprt.decision} · LLR{" "}
-                  {Number(payload.sprt.llr).toFixed(3)} · bounds{" "}
-                  {payload.sprt.lower_bound} / {payload.sprt.upper_bound}
-                </div>
-                <div className="analysis-pv">
-                  H0 {payload.sprt.elo0} Elo · H1 {payload.sprt.elo1} Elo ·
-                  Ptnml [{(payload.sprt.ptnml || []).join(", ")}]
-                </div>
-              </>
-            )}
+            {payload.sprt && <SprtSummary sprt={payload.sprt} />}
           </div>
         )}
         <AnalysisPanel
