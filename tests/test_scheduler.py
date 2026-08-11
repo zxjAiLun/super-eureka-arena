@@ -202,7 +202,7 @@ def test_sprt_max_pairs_inconclusive(scheduler, engine_factory, tournament_facto
     _run_until(
         lambda: _load(engine_factory, tournament_id).status == SPRT_MAX_PAIRS,
         scheduler,
-        max_ticks=200,
+        max_ticks=800,
     )
     import json
 

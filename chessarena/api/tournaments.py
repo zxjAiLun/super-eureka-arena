@@ -217,23 +217,57 @@ def create_tournament(
     session: Session = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    preset_a, build_a = _get_enabled_preset_or_422(
-        session, body.engine_a.preset_id, "engine_a"
-    )
-    preset_b, build_b = _get_enabled_preset_or_422(
-        session, body.engine_b.preset_id, "engine_b"
-    )
-    if (
-        body.engine_a.preset_id == body.engine_b.preset_id
-        and not body.allow_intentional_self_play
-    ):
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "both sides use the same engine preset; set "
-                "allow_intentional_self_play to run it deliberately"
-            ),
+    def _resolve_side(ref, label: str):
+        """S4.3E Phase 1: EngineVersion (immutable rated identity) or
+        EnginePreset (experimental launch template) side selection."""
+        from ..models import EngineVersion
+        from ..services.versions import get_version
+
+        if ref.version_id is not None:
+            if ref.custom_elo is not None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{label}: custom_elo is not valid with version_id",
+                )
+            version = get_version(session, ref.version_id)
+            if version is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{label}: unknown engine version "
+                           f"{ref.version_id}",
+                )
+            return ("version", version, None)
+        preset, build = _get_enabled_preset_or_422(
+            session, ref.preset_id, label
         )
+        return ("preset", preset, build)
+
+    side_a = _resolve_side(body.engine_a, "engine_a")
+    side_b = _resolve_side(body.engine_b, "engine_b")
+    if side_a[0] == "preset" and side_b[0] == "preset":
+        if (
+            side_a[1].preset_id == side_b[1].preset_id
+            and not body.allow_intentional_self_play
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "both sides use the same engine preset; set "
+                    "allow_intentional_self_play to run it deliberately"
+                ),
+            )
+    elif side_a[0] == "version" and side_b[0] == "version":
+        if (
+            side_a[1].version_id == side_b[1].version_id
+            and not body.allow_intentional_self_play
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "both sides use the same engine version; set "
+                    "allow_intentional_self_play to run it deliberately"
+                ),
+            )
 
     opening = _get_enabled_opening_or_422(session, body.opening_set_id)
     if body.time_control not in TIME_CONTROLS:
@@ -310,13 +344,15 @@ def create_tournament(
 
     # P4.6: a per-match UCI_Elo override is validated against the selected
     # build's real probed capability schema — never a hardcoded range.
-    for label, build, custom_elo in (
-        ("engine_a", build_a, body.engine_a.custom_elo),
-        ("engine_b", build_b, body.engine_b.custom_elo),
+    # (Version-selected sides reject custom_elo at side resolution.)
+    for label, (kind, obj, build), ref in (
+        ("engine_a", side_a, body.engine_a),
+        ("engine_b", side_b, body.engine_b),
     ):
+        custom_elo = ref.custom_elo
         if custom_elo is None:
             continue
-        schema = build.uci_options_schema or {}
+        schema = (build or {}).uci_options_schema or {}
         elo = schema.get("UCI_Elo")
         strength = schema.get("UCI_LimitStrength")
         if elo is None or elo.get("type") != "spin":
@@ -392,13 +428,44 @@ def create_tournament(
             **({"custom_elo": custom_elo} if custom_elo is not None else {}),
         }
 
+    def _snapshot_version(version) -> dict:
+        """S4.3E Phase 1: freeze an EngineVersion's immutable launch identity
+        into the tournament snapshot. The worker launches from these frozen
+        values; EngineVersion is never reread during a running tournament."""
+        from ..models import EngineBuild
+
+        build = (
+            session.query(EngineBuild)
+            .filter(EngineBuild.build_id == version.build_id)
+            .first()
+        )
+        args = list(version.command_args or [])
+        profile = args[1] if len(args) >= 2 else f"version:{version.version_id}"
+        return {
+            "version_id": version.version_id,
+            "display_name": version.display_name,
+            "build_id": version.build_id,
+            "profile": profile,
+            "command_args": args,
+            "uci_options": dict(version.uci_options or {}),
+            "uci_options_schema": (build.uci_options_schema if build else None)
+            or {},
+            "git_sha": version.source_sha,
+            "source_sha": version.source_sha,
+            "binary_sha256": version.binary_sha256,
+            "identity_fingerprint": version.identity_fingerprint,
+        }
+
+    def _snapshot_side(kind, obj, build, ref) -> dict:
+        if kind == "version":
+            return _snapshot_version(obj)
+        return _snapshot_engine(obj, build, ref.custom_elo)
+
+    snap_a = _snapshot_side(side_a[0], side_a[1], side_a[2], body.engine_a)
+    snap_b = _snapshot_side(side_b[0], side_b[1], side_b[2], body.engine_b)
     config_snapshot = {
-        "engine_a": _snapshot_engine(
-            preset_a, build_a, body.engine_a.custom_elo
-        ),
-        "engine_b": _snapshot_engine(
-            preset_b, build_b, body.engine_b.custom_elo
-        ),
+        "engine_a": snap_a,
+        "engine_b": snap_b,
         "opening_set": {
             "opening_set_id": opening.opening_set_id,
             "sha256": opening.sha256,
@@ -439,12 +506,12 @@ def create_tournament(
     tournament = Tournament(
         name=body.name,
         status=DRAFT,
-        engine_a_build_id=build_a.build_id,
+        engine_a_build_id=snap_a["build_id"],
         engine_a_profile=config_snapshot["engine_a"]["profile"],
-        engine_b_build_id=build_b.build_id,
+        engine_b_build_id=snap_b["build_id"],
         engine_b_profile=config_snapshot["engine_b"]["profile"],
-        engine_a_preset_id=preset_a.preset_id,
-        engine_b_preset_id=preset_b.preset_id,
+        engine_a_preset_id=snap_a.get("preset_id"),
+        engine_b_preset_id=snap_b.get("preset_id"),
         opening_set_id=opening.opening_set_id,
         time_control=body.time_control,
         requested_pairs=body.pairs,

@@ -167,6 +167,67 @@ class EnginePreset(Base):
     )
 
 
+# EngineVersion lifecycle statuses (S4.3E ADR: version == Elo participant).
+ENGINE_VERSION_STATUSES = frozenset(
+    {"candidate", "production", "historical", "experimental"}
+)
+
+
+class EngineVersion(Base):
+    """Permanent immutable chess identity == Elo participant.
+
+    ``version_id`` is the rating participant identity (NOT display_name and
+    NOT the anonymous fingerprint). Launch configuration is SNAPSHOTTED at
+    creation (build_id, command_args, uci_options, source_sha,
+    binary_sha256); later EnginePreset edits never affect it.
+    """
+
+    __tablename__ = "engine_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+
+    build_id: Mapped[str] = mapped_column(String, nullable=False)
+    command_args: Mapped[list] = mapped_column(JSON, nullable=False)
+    uci_options: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+    source_sha: Mapped[str] = mapped_column(String, nullable=False)
+    binary_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    identity_fingerprint: Mapped[str] = mapped_column(
+        String(64), unique=True, nullable=False
+    )
+
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    rating_enabled: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    public_visible: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+class EngineChannel(Base):
+    """Mutable alias (e.g. ``current-final``) pointing at one EngineVersion.
+
+    Promotion = repoint the channel; neither EngineVersion is ever mutated.
+    The channel itself is not a participant and carries no rating.
+    """
+
+    __tablename__ = "engine_channels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    channel_id: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    engine_version_id: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+
+
 class OpeningSet(Base):
     __tablename__ = "opening_sets"
 

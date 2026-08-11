@@ -13,7 +13,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .api import builds, health, openings, public, tournaments
+from .api import builds, health, openings, public, tournaments, versions
 from .config import Settings, get_settings
 from .db import bind_session_factory, make_engine, make_session_factory
 from .services import artifacts
@@ -62,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router, prefix=api_prefix)
     app.include_router(builds.router, prefix=api_prefix)
     app.include_router(openings.router, prefix=api_prefix)
+    app.include_router(versions.router, prefix=api_prefix)
     app.include_router(tournaments.router, prefix=api_prefix)
     app.include_router(tournaments.admin_router, prefix=bp)
 

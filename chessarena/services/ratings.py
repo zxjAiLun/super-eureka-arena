@@ -35,6 +35,7 @@ from ..models import (
     RESULT_TERMINAL_STATUSES,
     EngineBuild,
     EnginePreset,
+    EngineVersion,
     Game,
     Tournament,
     coerce_utc,
@@ -55,6 +56,29 @@ def engine_fingerprint(side: dict) -> str:
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def resolve_participant_id(session, side: dict) -> str:
+    """S4.3E ADR: the rating participant identity for one frozen side.
+
+    Resolution rule:
+    - frozen snapshot has version_id           -> that version_id
+    - else legacy fingerprint matching exactly
+      one EngineVersion.identity_fingerprint   -> that EngineVersion.version_id
+    - else                                     -> "legacy:" + fingerprint
+    """
+    vid = (side or {}).get("version_id")
+    if vid:
+        return vid
+    fp = engine_fingerprint(side)
+    matches = (
+        session.query(EngineVersion)
+        .filter(EngineVersion.identity_fingerprint == fp)
+        .all()
+    )
+    if len(matches) == 1:
+        return matches[0].version_id
+    return "legacy:" + fp
 
 
 def _uci_elo(side: dict) -> Optional[int]:
@@ -117,7 +141,7 @@ def _score_for_a(game: Game) -> Optional[float]:
 
 
 def _history_side(side: dict) -> dict:
-    """Participant metadata for a snapshot side that is not a public preset
+    """Participant metadata for a snapshot side that is not a public participant
     (archived/legacy configs that still have rated history)."""
     return {
         "display_name": (side.get("display_name")
@@ -128,8 +152,28 @@ def _history_side(side: dict) -> dict:
 
 
 def _participant_base(session) -> dict:
-    """fingerprint -> base metadata for every public/enabled participant."""
+    """participant_id -> base metadata for every public/enabled participant.
+
+    Ordinary rated participants come from EngineVersion (version_id is the
+    Elo identity); Stockfish Limited anchors stay on the existing preset path
+    (fixed UCI_Elo semantics). Ordinary presets are no longer auto-participants.
+    """
     out: dict[str, dict] = {}
+    versions = (
+        session.query(EngineVersion)
+        .filter(
+            EngineVersion.public_visible.is_(True),
+            EngineVersion.rating_enabled.is_(True),
+        )
+        .all()
+    )
+    for version in versions:
+        out[version.version_id] = {
+            "display_name": version.display_name,
+            "is_anchor": False,
+            "anchor_rating": None,
+            "fingerprint": version.identity_fingerprint,
+        }
     presets = (
         session.query(EnginePreset)
         .filter(
@@ -147,10 +191,14 @@ def _participant_base(session) -> dict:
         if build is None or not build.enabled:
             continue
         side = _side_from_preset(build, preset)
-        out[engine_fingerprint(side)] = {
+        if not is_anchor(session, side):
+            continue
+        fp = engine_fingerprint(side)
+        out[fp] = {
             "display_name": preset.display_name,
-            "is_anchor": is_anchor(session, side),
+            "is_anchor": True,
             "anchor_rating": anchor_rating(side),
+            "fingerprint": fp,
         }
     return out
 
@@ -158,12 +206,15 @@ def _participant_base(session) -> dict:
 def compute_ratings(session) -> dict:
     """{time_control: {"engines": [rows incl. anchors], "anchors": [...]}}.
 
-    Each engine row: fingerprint, display_name, rating (int), games, wins,
-    draws, losses, status (fixed | initial | rated).  Deterministic.
+    Each engine row: participant_id, fingerprint, display_name, rating (int),
+    games, wins, draws, losses, status (fixed | initial | rated).
+    Deterministic. Participants are keyed by the S4.3E ADR participant
+    identity (version_id, fingerprint for anchors, or "legacy:" + fingerprint
+    for unmapped history).
 
-    Public/enabled participants appear in EVERY pool (even with zero games);
-    history-only fingerprints (archived/hidden configs) appear ONLY in the
-    pools where they actually have rated history.
+    Public participants appear in EVERY pool (even with zero games);
+    history-only identities (archived/legacy configs) appear ONLY in the pools
+    where they actually have rated history.
     """
     public_participants = _participant_base(session)
     history_by_tc: dict[str, dict[str, dict]] = {
@@ -188,25 +239,33 @@ def compute_ratings(session) -> dict:
             continue
         snap = t.config_snapshot or {}
         side_a, side_b = snap.get("engine_a") or {}, snap.get("engine_b") or {}
+        pid_a = resolve_participant_id(session, side_a)
+        pid_b = resolve_participant_id(session, side_b)
         fp_a = engine_fingerprint(side_a)
         fp_b = engine_fingerprint(side_b)
-        history_by_tc[tc].setdefault(fp_a, _history_side(side_a))
-        history_by_tc[tc].setdefault(fp_b, _history_side(side_b))
+        history_by_tc[tc].setdefault(
+            pid_a, {**_history_side(side_a), "fingerprint": fp_a}
+        )
+        history_by_tc[tc].setdefault(
+            pid_b, {**_history_side(side_b), "fingerprint": fp_b}
+        )
         anchor_a = is_anchor(session, side_a)
         anchor_b = is_anchor(session, side_b)
         if anchor_a:
-            anchor_by_tc[tc][fp_a] = {
+            anchor_by_tc[tc][pid_a] = {
                 "display_name": side_a.get("display_name")
                 or side_a.get("preset_id") or "unknown",
                 "is_anchor": True,
                 "anchor_rating": anchor_rating(side_a),
+                "fingerprint": fp_a,
             }
         if anchor_b:
-            anchor_by_tc[tc][fp_b] = {
+            anchor_by_tc[tc][pid_b] = {
                 "display_name": side_b.get("display_name")
                 or side_b.get("preset_id") or "unknown",
                 "is_anchor": True,
                 "anchor_rating": anchor_rating(side_b),
+                "fingerprint": fp_b,
             }
         games = (
             session.query(Game)
@@ -224,25 +283,26 @@ def compute_ratings(session) -> dict:
                 t.id,
                 g.game_number,
             )
-            pools[tc].append((order, fp_a, fp_b, sa))
+            pools[tc].append((order, pid_a, pid_b, sa))
 
     result: dict[str, dict] = {}
     for tc, pool_games in pools.items():
         merged: dict[str, dict] = {}
-        for fp, meta in public_participants.items():
-            merged[fp] = meta
-        # History-only fingerprints join only the pools they played in.
-        for fp, meta in history_by_tc[tc].items():
-            merged.setdefault(fp, meta)
+        for pid, meta in public_participants.items():
+            merged[pid] = meta
+        # History-only identities join only the pools they played in.
+        for pid, meta in history_by_tc[tc].items():
+            merged.setdefault(pid, meta)
         # Snapshot anchors override whatever the base metadata said.
-        for fp, meta in anchor_by_tc[tc].items():
-            merged[fp] = meta
+        for pid, meta in anchor_by_tc[tc].items():
+            merged[pid] = meta
 
         rows: dict[str, dict] = {}
-        for fp, base in merged.items():
+        for pid, base in merged.items():
             anchor_elo = base.get("anchor_rating")
-            rows[fp] = {
-                "fingerprint": fp,
+            rows[pid] = {
+                "participant_id": pid,
+                "fingerprint": base.get("fingerprint") or pid,
                 "display_name": base["display_name"],
                 "rating": (
                     float(anchor_elo)
@@ -255,14 +315,14 @@ def compute_ratings(session) -> dict:
                 "draws": 0,
                 "losses": 0,
             }
-        for _, fp_a, fp_b, sa in sorted(pool_games):
-            # Same-fingerprint self-play carries no relative-strength
+        for _, pid_a, pid_b, sa in sorted(pool_games):
+            # Same-identity self-play carries no relative-strength
             # information (and would double-count Games/W-D-L), so the game
             # never enters the rating statistics.
-            if fp_a == fp_b:
+            if pid_a == pid_b:
                 continue
-            a = rows.get(fp_a)
-            b = rows.get(fp_b)
+            a = rows.get(pid_a)
+            b = rows.get(pid_b)
             if a is None or b is None:
                 continue
             ea = 1 / (1 + 10 ** ((b["rating"] - a["rating"]) / 400))
@@ -287,11 +347,12 @@ def compute_ratings(session) -> dict:
                 b["losses"] += 1
 
         engines = []
-        for fp, r in sorted(rows.items(),
+        for pid, r in sorted(rows.items(),
                             key=lambda kv: (kv[1]["display_name"].lower(), kv[0])):
             engines.append(
                 {
-                    "fingerprint": fp,
+                    "participant_id": pid,
+                    "fingerprint": r["fingerprint"],
                     "display_name": r["display_name"],
                     "rating": int(round(r["rating"])),
                     "games": r["games"],
@@ -328,9 +389,9 @@ def engine_rating(session, t: Tournament) -> Optional[dict]:
     a_anchor = is_anchor(session, side_a)
     b_anchor = is_anchor(session, side_b)
     target = side_b if a_anchor and not b_anchor else side_a
-    fingerprint = engine_fingerprint(target)
+    participant_id = resolve_participant_id(session, target)
     all_ratings = compute_ratings(session)
     for row in all_ratings.get(t.time_control, {}).get("engines", []):
-        if row.get("fingerprint") == fingerprint:
+        if row.get("participant_id") == participant_id:
             return row
     return None

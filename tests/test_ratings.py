@@ -4,6 +4,8 @@ public participants shown even with zero games, deterministic recompute."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from chessarena.models import (
@@ -163,18 +165,43 @@ def _engine_row(session, pool="blitz_3_2", display="ChessEngine Production"):
 
 def test_zero_game_participants_show_initial(app_client, engine_factory,
                                              registered):
-    """All public/enabled participants appear even with no rated history."""
+    """S4.3E Phase 1: zero-game participants come from EngineVersions
+    (version == Elo identity); ordinary presets no longer auto-enter the
+    pool without history."""
+    from chessarena.services import versions
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
     with engine_factory() as session:
+        versions.create_version_from_preset(
+            session,
+            version_id="ce-test-20260801",
+            display_name="ChessEngine Production",
+            preset_id="chessengine-production",
+            status="historical",
+        )
+        versions.create_version_from_build(
+            session,
+            version_id="ce-test-20260811",
+            display_name="ChessEngine Production",
+            build_id=manifest["build_id"],
+            command_args=[],
+            status="production",
+        )
         rows = ratings.compute_ratings(session)["blitz_3_2"]["engines"]
     names = {r["display_name"]: r for r in rows}
     assert "ChessEngine Production" in names
-    assert "ChessEngine Legacy Baseline" in names
+    assert names["ChessEngine Production"]["status"] == "initial"
     for r in rows:
         assert r["status"] in ("initial", "fixed")
         if r["status"] == "initial":
             assert r["rating"] == 1800
             assert r["games"] == 0
             assert (r["wins"], r["draws"], r["losses"]) == (0, 0, 0)
+    pids = {r["participant_id"] for r in rows}
+    assert "ce-test-20260801" in pids
+    assert "ce-test-20260811" in pids
 
 
 def test_fifty_percent_vs_anchor_moves_toward_anchor(engine_factory,
@@ -290,7 +317,23 @@ def test_unverified_games_do_not_count(engine_factory, tournament_factory):
 
 
 def test_delete_changes_recomputation(engine_factory, tournament_factory,
-                                      settings, app_client):
+                                      settings, app_client, registered):
+    from chessarena.services import versions
+
+    # S4.3E continuity: register an EngineVersion matching the engine side's
+    # legacy fingerprint; the rated match resolves to the version, and after
+    # deletion the version returns to initial 1800.
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    with engine_factory() as session:
+        versions.create_version_from_preset(
+            session,
+            version_id="ce-test-production",
+            display_name="ChessEngine Production",
+            preset_id="chessengine-production",
+            status="production",
+        )
     tid = _completed_rated(engine_factory, tournament_factory,
                            wins=10, losses=0, draws=0, anchor=SF_A)
     with engine_factory() as session:
@@ -309,6 +352,7 @@ def test_delete_changes_recomputation(engine_factory, tournament_factory,
     assert after["games"] == 0
     assert after["rating"] == 1800
     assert after["status"] == "initial"
+    assert after["participant_id"] == "ce-test-production"
 
 
 def test_custom_elo_anchor_recognized(engine_factory, tournament_factory):

@@ -44,7 +44,11 @@ class OpeningSetOut(BaseModel):
 # Tournaments
 # ---------------------------------------------------------------------------
 class EngineRef(BaseModel):
-    preset_id: str = Field(min_length=1)
+    preset_id: str = Field(default="", min_length=0)
+    # S4.3E Phase 1: stable rated identity side (version == Elo participant).
+    # When set, the tournament freezes the EngineVersion launch snapshot;
+    # custom_elo is not allowed with version selection.
+    version_id: Optional[str] = Field(default=None, min_length=1)
     # P4.6: per-match UCI_Elo override for the selected preset's engine build.
     # None keeps the preset exactly as registered; a value is validated against
     # the build's probed capability schema (UCI_Elo spin min/max +
@@ -70,6 +74,51 @@ class SprtConfig(BaseModel):
     lower_bound: Optional[float] = None
     upper_bound: Optional[float] = None
     max_pairs: int = Field(ge=1)
+
+
+class EngineVersionCreate(BaseModel):
+    """S4.3E Phase 1: create an immutable EngineVersion (version == Elo
+    participant). Exactly one of build_id (production/default artifact mode)
+    or preset_id (historical/experimental snapshot mode) is required."""
+
+    version_id: str = Field(min_length=1, max_length=100)
+    display_name: str = Field(min_length=1, max_length=200)
+    build_id: Optional[str] = Field(default=None, min_length=1)
+    preset_id: Optional[str] = Field(default=None, min_length=1)
+    command_args: Optional[list[str]] = None
+    uci_options: Optional[dict] = None
+    status: str = Field(default="candidate", pattern="^(candidate|production|historical|experimental)$")
+    rating_enabled: bool = True
+    public_visible: bool = True
+
+
+class EngineVersionOut(BaseModel):
+    version_id: str
+    display_name: str
+    build_id: str
+    command_args: list
+    uci_options: dict
+    source_sha: str
+    binary_sha256: str
+    identity_fingerprint: str
+    status: str
+    rating_enabled: bool
+    public_visible: bool
+    created_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class EngineChannelUpdate(BaseModel):
+    engine_version_id: str = Field(min_length=1)
+
+
+class EngineChannelOut(BaseModel):
+    channel_id: str
+    engine_version_id: str
+    updated_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
 
 
 class TournamentCreate(BaseModel):
