@@ -7,6 +7,7 @@ A "Started game N" line resets the per-game telemetry."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from chessarena.models import PAUSED, PAUSING, RUNNING, Tournament, utcnow
@@ -338,6 +339,98 @@ def test_live_auto_detect_excludes_paused(settings, engine_factory,
         session.commit()
     r = app_client.get("/chessarena/public-api/v1/live")
     assert r.json()["status"] == "idle"
+
+
+def test_live_sprt_summary_running(settings, engine_factory,
+                                   tournament_factory, app_client):
+    """P4.12 follow-up: a running SPRT match exposes its whitelisted SPRT
+    evidence (LLR / bounds / decision) in the live payload."""
+    tid = tournament_factory(name="live-sprt-run", pairs=200, status=RUNNING,
+                             time_control="blitz_3_2")
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        t.started_at = utcnow()
+        t.completed_pairs = 67
+        snap = dict(t.config_snapshot or {})
+        snap["sprt"] = {
+            "enabled": True, "elo_model": "logistic", "elo0": 0, "elo1": 30,
+            "alpha": 0.05, "beta": 0.05,
+            "lower_bound": -2.944, "upper_bound": 2.944,
+            "max_pairs": 200,
+        }
+        t.config_snapshot = snap
+        run_dir = settings.run_root / tid
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "sprt.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "tournament_id": tid,
+                "elo_model": "logistic", "elo0": 0, "elo1": 30,
+                "alpha": 0.05, "beta": 0.05,
+                "lower_bound": -2.944, "upper_bound": 2.944,
+                "pairs": 67, "games": 134,
+                "ptnml": [10, 20, 30, 40, 34],
+                "llr": 1.234, "decision": "CONTINUE",
+                "binary_sha": "internal", "candidate_preset": "internal",
+                "baseline_preset": "internal", "opening_set": "internal",
+            }),
+            encoding="utf-8",
+        )
+        session.commit()
+    r = app_client.get(f"/chessarena/public-api/v1/live?tournament_id={tid}")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "live"
+    assert body["pairs_completed"] == 67
+    sprt = body["sprt"]
+    assert sprt is not None
+    assert sprt["decision"] == "CONTINUE"
+    assert sprt["llr"] == 1.234
+    assert sprt["lower_bound"] == -2.944 and sprt["upper_bound"] == 2.944
+    assert sprt["ptnml"] == [10, 20, 30, 40, 34]
+    # Whitelist: no internal SPRT evidence fields.
+    text = str(body)
+    for forbidden in ("binary_sha", "candidate_preset", "baseline_preset",
+                      "schema_version"):
+        assert forbidden not in text
+
+
+def test_live_sprt_terminal_shows_final_decision(
+        settings, engine_factory, tournament_factory, app_client):
+    """An SPRT-terminal match's live payload reports completed AND carries the
+    final decision (ACCEPT_H1) — never a lingering 'live' state."""
+    from chessarena.models import SPRT_ACCEPT_H1
+
+    tid = tournament_factory(name="live-sprt-done", pairs=200, status=RUNNING,
+                             time_control="blitz_3_2")
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        t.started_at = utcnow()
+        t.status = SPRT_ACCEPT_H1
+        t.completed_pairs = 263
+        t.finished_at = utcnow()
+        run_dir = settings.run_root / tid
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "sprt.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "tournament_id": tid,
+                "elo_model": "logistic", "elo0": 0, "elo1": 30,
+                "alpha": 0.05, "beta": 0.05,
+                "lower_bound": -2.944, "upper_bound": 2.944,
+                "pairs": 263, "games": 526,
+                "ptnml": [100, 200, 300, 400, 152],
+                "llr": 3.1, "decision": "ACCEPT_H1",
+            }),
+            encoding="utf-8",
+        )
+        session.commit()
+    body = app_client.get(
+        f"/chessarena/public-api/v1/live?tournament_id={tid}"
+    ).json()
+    assert body["status"] == "completed"
+    assert body["sprt"]["decision"] == "ACCEPT_H1"
+    assert body["match_url"] == f"/chessarena/matches/{tid}"
 
 
 def test_live_auto_detect_includes_pausing(settings, engine_factory,

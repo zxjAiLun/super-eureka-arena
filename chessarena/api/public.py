@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
@@ -225,6 +227,29 @@ def _current_pair(t: Tournament):
     return None
 
 
+def _sprt_summary(t: Tournament) -> Optional[dict]:
+    """Whitelisted SPRT evidence (S4.3D) from the tournament's sprt.json —
+    display fields only, never binary SHAs / preset ids / opening internals.
+    Returns None when the match has no SPRT configuration or no evidence yet."""
+    from ..services import artifacts
+
+    path = artifacts.tournament_run_dir(t.id) / "sprt.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    out = {
+        k: data.get(k)
+        for k in ("elo_model", "elo0", "elo1", "lower_bound", "upper_bound",
+                  "pairs", "games", "ptnml", "llr", "decision")
+    }
+    if out.get("decision") is None:
+        return None
+    return out
+
+
 def _live_payload(session: Session, settings, t: Tournament) -> dict:
     """Build the LiveOut payload for a single tournament."""
     base = {
@@ -241,9 +266,11 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
         "time_control": t.time_control,
         "opening_set_id": t.opening_set_id,
         "pairs_total": t.requested_pairs,
+        "pairs_completed": t.completed_pairs,
         "candidate_wins": t.candidate_wins,
         "candidate_losses": t.candidate_losses,
         "draws": t.draws,
+        "sprt": _sprt_summary(t),
     }
     if t.status in ENDED_STATUSES:
         result = {

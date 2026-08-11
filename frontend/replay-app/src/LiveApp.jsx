@@ -282,13 +282,33 @@ export default function LiveApp({ tournamentId, basePath }) {
       <div className="replay-side-col">
         <Badges data={payload} />
         {phase === "live" && payload.candidate_wins != null && (
-          <div className="live-meta">
-            Verified W-D-L {payload.candidate_wins}-{payload.draws}-
-            {payload.candidate_losses} · Δ Elo (A−B){" "}
-            {eloDeltaLabel(
-              payload.candidate_wins,
-              payload.draws,
-              payload.candidate_losses
+          <div className="analysis-panel">
+            <div className="analysis-score">Match summary</div>
+            <div className="analysis-line">
+              Progress: {payload.pairs_completed ?? 0} / {payload.pairs_total}{" "}
+              pairs
+            </div>
+            <div className="analysis-line">
+              Verified W-D-L {payload.candidate_wins}-{payload.draws}-
+              {payload.candidate_losses} · Δ Elo (A−B){" "}
+              {eloDeltaLabel(
+                payload.candidate_wins,
+                payload.draws,
+                payload.candidate_losses
+              )}
+            </div>
+            {payload.sprt && (
+              <>
+                <div className="analysis-line">
+                  SPRT · {payload.sprt.decision} · LLR{" "}
+                  {Number(payload.sprt.llr).toFixed(3)} · bounds{" "}
+                  {payload.sprt.lower_bound} / {payload.sprt.upper_bound}
+                </div>
+                <div className="analysis-pv">
+                  H0 {payload.sprt.elo0} Elo · H1 {payload.sprt.elo1} Elo ·
+                  Ptnml [{(payload.sprt.ptnml || []).join(", ")}]
+                </div>
+              </>
             )}
           </div>
         )}

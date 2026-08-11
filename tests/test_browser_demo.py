@@ -1445,7 +1445,7 @@ def test_browser_analysis_off_by_default_and_board_stable(
                     f"{what}: board position/size moved {a} -> {b}"
                 )
 
-            panel = page.locator(".analysis-panel")
+            panel = page.locator(".analysis-panel", has_text="Stockfish")
             panel.wait_for(state="visible", timeout=20000)
 
             # OFF by default: no worker, no search, explicit start card, and
@@ -1683,7 +1683,7 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             # The browser Stockfish panel must appear without any server
             # diagnostics artifact; analysis is OFF by default (P4.12) so the
             # user starts it explicitly before any score appears.
-            panel = page.locator(".analysis-panel")
+            panel = page.locator(".analysis-panel", has_text="Stockfish")
             panel.wait_for(state="visible", timeout=20000)
             assert "Runs locally in this browser" in panel.inner_text()
             page.locator(".analysis-controls button", has_text="Start analysis").click()
@@ -1789,8 +1789,8 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             bad_page.locator(".analysis-controls button", has_text="Start analysis").click()
             bad_page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-panel');
-                    return el && el.innerText.includes('unavailable');
+                    const els = document.querySelectorAll('.analysis-panel');
+                    return Array.from(els).some((el) => el.innerText.includes('unavailable'));
                 }""",
                 timeout=20000,
             )
@@ -1819,8 +1819,8 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             hung_page.locator(".analysis-controls button", has_text="Start analysis").click()
             hung_page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-panel');
-                    return el && el.innerText.includes('unavailable');
+                    const els = document.querySelectorAll('.analysis-panel');
+                    return Array.from(els).some((el) => el.innerText.includes('unavailable'));
                 }""",
                 timeout=25000,
             )
@@ -1852,8 +1852,8 @@ def test_browser_replay_interactive_stockfish(settings, engine_factory, register
             fake_page.locator(".analysis-controls button", has_text="Start analysis").click()
             fake_page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-score');
-                    return el && el.innerText.includes('1.00');
+                    const els = document.querySelectorAll('.analysis-score');
+                    return Array.from(els).some((el) => el.innerText.includes('1.00'));
                 }""",
                 timeout=20000,
             )
@@ -2013,6 +2013,143 @@ LIVE_FEN_B = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
 LIVE_FEN_C = "rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
 
 
+def test_browser_live_match_summary_and_sprt(
+    settings, engine_factory, registered
+):
+    """P4.12 follow-up: the public Live page shows the match summary
+    (progress, W-D-L, Δ Elo) and the whitelisted SPRT block for a running
+    SPRT match."""
+    import json as _json
+
+    manifest = _json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    opening_manifest = _json.loads(
+        (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    from chessarena.models import RUNNING, PairJob, Tournament, utcnow
+
+    with engine_factory() as session:
+        tournament = Tournament(
+            id=str(uuid.uuid4()),
+            name="live-sprt-e2e",
+            status=RUNNING,
+            engine_a_build_id=manifest["build_id"],
+            engine_a_profile="current-final",
+            engine_b_build_id=manifest["build_id"],
+            engine_b_profile="current",
+            opening_set_id=opening_manifest["opening_set_id"],
+            time_control="blitz_3_2",
+            requested_pairs=200,
+            completed_pairs=67,
+            config_snapshot={
+                "engine_a": {"display_name": "EngineA", "build_id": manifest["build_id"]},
+                "engine_b": {"display_name": "EngineB", "build_id": manifest["build_id"]},
+                "opening_set": {"opening_set_id": opening_manifest["opening_set_id"]},
+                "time_control": "blitz_3_2",
+                "sprt": {
+                    "enabled": True, "elo_model": "logistic",
+                    "elo0": 0, "elo1": 30, "alpha": 0.05, "beta": 0.05,
+                    "lower_bound": -2.944, "upper_bound": 2.944,
+                    "max_pairs": 200,
+                },
+            },
+        )
+        session.add(tournament)
+        session.flush()
+        tournament.started_at = utcnow()
+        pair = PairJob(
+            id=str(uuid.uuid4()),
+            tournament_id=tournament.id,
+            pair_index=0,
+            opening_index=0,
+            status=RUNNING,
+        )
+        session.add(pair)
+        session.flush()
+        run_dir = settings.run_root / tournament.id / "pairs" / "000000" / "attempt-01"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        opening = LIVE_FEN_A
+        (run_dir / "opening.epd").write_text(opening + "\n", encoding="utf-8")
+        (run_dir / "stdout.log").write_text(
+            "Started game 1 of 2 (EngineA vs EngineB)\n"
+            + _live_stream_lines("", "EngineA", 0, 45, 12, "e2e4 e7e5", "e2e4")
+            + "\n",
+            encoding="utf-8",
+        )
+        pair.run_directory = str(run_dir)
+        t_run = settings.run_root / tournament.id
+        (t_run / "sprt.json").write_text(
+            _json.dumps({
+                "schema_version": 1,
+                "tournament_id": tournament.id,
+                "elo_model": "logistic", "elo0": 0, "elo1": 30,
+                "alpha": 0.05, "beta": 0.05,
+                "lower_bound": -2.944, "upper_bound": 2.944,
+                "pairs": 67, "games": 134,
+                "ptnml": [10, 20, 30, 40, 34],
+                "llr": 1.234, "decision": "CONTINUE",
+            }),
+            encoding="utf-8",
+        )
+        session.commit()
+        tid = tournament.id
+
+    os.environ["ARENA_DB_URL"] = settings.db_url
+    os.environ["ARENA_RUN_ROOT"] = str(settings.run_root)
+    os.environ["ARENA_BUILD_ROOT"] = str(settings.build_root)
+    os.environ["ARENA_OPENING_ROOT"] = str(settings.opening_root)
+    os.environ["ARENA_CUTECHESS"] = str(settings.cutechess)
+    os.environ["ARENA_BASE_PATH"] = settings.base_path
+
+    port = _free_port()
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
+         "--factory", "--host", "127.0.0.1", "--port", str(port),
+         "--log-level", "warning"],
+        cwd=str(ARENA_ROOT),
+        env=dict(os.environ),
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    base = f"http://127.0.0.1:{port}/chessarena"
+    try:
+        _wait_until_up(f"{base}/live?tournament_id={tid}")
+
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            console_errors: list[str] = []
+            page.on("pageerror", lambda exc: console_errors.append(str(exc)))
+            page.goto(f"{base}/live?tournament_id={tid}", wait_until="domcontentloaded")
+            page.locator(".analysis-panel").first.wait_for(state="visible",
+                                                           timeout=30000)
+            body = page.locator("body").inner_text()
+            assert "Match summary" in body
+            assert "Progress: 67 / 200 pairs" in body
+            assert "Verified W-D-L" in body and "Δ Elo (A−B)" in body
+            # The whitelisted SPRT block renders with the live decision.
+            assert "SPRT" in body and "CONTINUE" in body
+            assert "LLR 1.234" in body
+            assert "-2.944 / 2.944" in body
+            assert "H0 0 Elo · H1 30 Elo" in body
+            assert "Ptnml [10, 20, 30, 40, 34]" in body
+            # Nothing internal leaks into the page.
+            for forbidden in ("binary_sha", "schema_version"):
+                assert forbidden not in body
+            assert not console_errors, f"browser console errors: {console_errors}"
+            browser.close()
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
 def _live_stream_lines(moves, engine_name, engine_index, cp, depth, pv, last):
     """One position cycle of a cutechess -debug stream (game 1, A white).
     The position is always built from LIVE_FEN_A plus the played moves."""
@@ -2147,13 +2284,13 @@ def test_browser_live_stockfish_eval_bar(
             # A. The browser Stockfish panel + eval bar appear on the REAL
             # telemetry FEN and produce a deterministic score.  P4.12:
             # analysis starts only after the user clicks Start.
-            panel = page.locator(".analysis-panel")
+            panel = page.locator(".analysis-panel", has_text="Stockfish")
             panel.wait_for(state="visible", timeout=30000)
             page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-score');
-                    return el && el.innerText.includes('1.00');
+                    const els = document.querySelectorAll('.analysis-score');
+                    return Array.from(els).some((el) => el.innerText.includes('1.00'));
                 }""",
                 timeout=30000,
             )
@@ -2190,8 +2327,8 @@ def test_browser_live_stockfish_eval_bar(
             )
             page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-score');
-                    return el && el.innerText.includes('-1.00');
+                    const els = document.querySelectorAll('.analysis-score');
+                    return Array.from(els).some((el) => el.innerText.includes('-1.00'));
                 }""",
                 timeout=30000,
             )
@@ -2213,15 +2350,15 @@ def test_browser_live_stockfish_eval_bar(
             )
             page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-score');
-                    return el && el.innerText.includes('1.00');
+                    const els = document.querySelectorAll('.analysis-score');
+                    return Array.from(els).some((el) => el.innerText.includes('1.00'));
                 }""",
                 timeout=30000,
             )
             assert page.evaluate("window.__goCount") == 3, (
                 f"expected 3 go after A -> B -> C, got {page.evaluate('window.__goCount')}"
             )
-            score_text = page.locator(".analysis-score").inner_text()
+            score_text = page.locator(".analysis-score", has_text="1.00").inner_text()
             assert score_text.startswith("+1.00"), (
                 f"C must show the fresh +1.00, got {score_text!r}"
             )
@@ -2362,7 +2499,7 @@ def test_browser_live_dispose_on_completed(
                 """
             )
             page.goto(f"{base}/live?tournament_id={tid1}", wait_until="domcontentloaded")
-            panel = page.locator(".analysis-panel")
+            panel = page.locator(".analysis-panel", has_text="Stockfish")
             panel.wait_for(state="visible", timeout=30000)
             # P4.12: no worker exists until the user starts analysis.
             assert page.evaluate("window.__goCount") == 0
@@ -2371,8 +2508,8 @@ def test_browser_live_dispose_on_completed(
             page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-score');
-                    return el && el.innerText.includes('1.00');
+                    const els = document.querySelectorAll('.analysis-score');
+                    return Array.from(els).some((el) => el.innerText.includes('1.00'));
                 }""",
                 timeout=30000,
             )
@@ -2406,8 +2543,8 @@ def test_browser_live_dispose_on_completed(
             page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-score');
-                    return el && el.innerText.includes('1.00');
+                    const els = document.querySelectorAll('.analysis-score');
+                    return Array.from(els).some((el) => el.innerText.includes('1.00'));
                 }""",
                 timeout=30000,
             )
@@ -2521,13 +2658,13 @@ def test_browser_live_stockfish_failure_isolated(
 
             # Worker failure -> visible unavailable state in the Stockfish
             # panel only (analysis is started by the user, then fails).
-            err_panel = page.locator(".analysis-panel")
+            err_panel = page.locator(".analysis-panel", has_text="Stockfish")
             err_panel.wait_for(state="visible", timeout=20000)
             page.locator(".analysis-controls button", has_text="Start analysis").click()
             page.wait_for_function(
                 """() => {
-                    const el = document.querySelector('.analysis-panel');
-                    return el && el.innerText.includes('unavailable');
+                    const els = document.querySelectorAll('.analysis-panel');
+                    return Array.from(els).some((el) => el.innerText.includes('unavailable'));
                 }""",
                 timeout=25000,
             )

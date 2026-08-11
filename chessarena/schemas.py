@@ -332,6 +332,10 @@ class LiveOut(BaseModel):
     candidate_losses: Optional[int] = None
     draws: Optional[int] = None
     match_url: Optional[str] = None
+    # P4.12 follow-up: verified pair progress for the public match summary.
+    pairs_completed: Optional[int] = None
+    # S4.3D SPRT evidence (whitelisted display fields from sprt.json).
+    sprt: Optional[dict] = None
     # P4.11 live telemetry (only present when the debug stream is available).
     current_fen: Optional[str] = None
     side_to_move: Optional[str] = None
