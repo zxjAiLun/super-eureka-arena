@@ -51,14 +51,65 @@ def run(argv: list[str]) -> None:
     subprocess.run(argv, check=True)
 
 
-def main() -> int:
+def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
     parser.add_argument("--name", required=True, help="build id / preset id, e.g. candidate-20260809")
     parser.add_argument("--host", default="server1")
     parser.add_argument("--platform", default="linux-x86_64")
+    # `--command-args` takes several values at once, which argparse cannot do
+    # for values that begin with '-': `--command-args --profile current-final`
+    # is rejected outright, and `--command-args=--profile current-final`
+    # silently keeps only `--profile`. `--command-arg` is repeatable and takes
+    # exactly one value, so `--command-arg=--profile --command-arg=current-final`
+    # passes a leading-dash argument through intact. Both are accepted and
+    # concatenated in order, so existing invocations keep working.
     parser.add_argument("--command-args", nargs="+", default=[])
+    parser.add_argument("--command-arg", action="append", default=[],
+                        metavar="ARG",
+                        help="one engine CLI argument; repeatable, and safe for "
+                             "values starting with '-' (use the '=' form, e.g. "
+                             "--command-arg=--profile)")
     parser.add_argument("--uci-option", action="append", default=[])
+    return parser
+
+
+def resolve_command_args(namespace: argparse.Namespace) -> list[str]:
+    """Positional-order concatenation of both spellings."""
+    return list(namespace.command_args) + list(namespace.command_arg)
+
+
+def preset_args_for_remote(command_args: list[str]) -> list[str]:
+    """Render engine CLI args for the remote register_candidate_preset call.
+
+    Two constraints come from that script's own parser, which takes
+    ``--command-args`` with ``nargs="+"``:
+
+    * repeating the flag does NOT append - argparse keeps only the last
+      occurrence, so emitting one flag per value silently discarded every
+      argument but the last;
+    * a value beginning with '-' cannot follow the flag at all.
+
+    So a profile pair is emitted through that script's purpose-built
+    ``--profile`` shortcut, and anything else is emitted as a single
+    ``--command-args`` followed by all its values.
+    """
+    if not command_args:
+        return []
+    if len(command_args) == 2 and command_args[0] == "--profile":
+        return ["--profile", command_args[1]]
+    leading_dash = [a for a in command_args if a.startswith("-")]
+    if leading_dash:
+        raise SystemExit(
+            "error: cannot forward leading-dash engine arguments "
+            f"{leading_dash} to register_candidate_preset.py; only the "
+            "'--profile <name>' form is supported remotely"
+        )
+    return ["--command-args", *command_args]
+
+
+def main() -> int:
+    parser = make_parser()
     args = parser.parse_args()
 
     binary = args.binary.resolve()
@@ -99,7 +150,8 @@ def main() -> int:
                     f"--preset-id {shlex.quote(build_id)}",
                     f"--display-name {shlex.quote(build_id)}",
                 ]
-                + [f"--command-args {shlex.quote(a)}" for a in args.command_args]
+                + [shlex.quote(a)
+                   for a in preset_args_for_remote(resolve_command_args(args))]
                 + [f"--uci-option {shlex.quote(o)}" for o in args.uci_option]
             ),
         ]
