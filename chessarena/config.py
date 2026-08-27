@@ -102,6 +102,47 @@ class Settings:
     # Logging
     log_level: str = os.environ.get("ARENA_LOG_LEVEL", "INFO")
 
+    # ------------------------------------------------------------------
+    # Human vs Engine play (dark-launch feature; see docs/design ADR on
+    # engine-version identity for why opponents are frozen at game start).
+    # ------------------------------------------------------------------
+    # Master switch.  OFF by default: every human-play page and API route
+    # fails closed with 404 until it is explicitly enabled in the env file.
+    human_play_enabled: bool = os.environ.get(
+        "ARENA_HUMAN_PLAY_ENABLED", "false"
+    ).lower() in ("1", "true", "yes", "on")
+    # Explicit opponent allowlist — comma-separated refs of the form
+    # "preset:<preset_id>" or "channel:<channel_id>".  Public visibility or a
+    # preset category NEVER grants human-play rights on its own.
+    human_play_opponents: str = os.environ.get(
+        "ARENA_HUMAN_PLAY_OPPONENTS", ""
+    )
+    # Fixed engine move budget (server-side hard cap; clients never send it).
+    human_play_movetime_ms: int = int(
+        os.environ.get("ARENA_HUMAN_PLAY_MOVETIME_MS", "1000")
+    )
+    # Per-IP creation limits (abuse guardrails for an anonymous surface).
+    human_play_max_active_per_ip: int = int(
+        os.environ.get("ARENA_HUMAN_PLAY_MAX_ACTIVE_PER_IP", "2")
+    )
+    human_play_max_created_per_hour: int = int(
+        os.environ.get("ARENA_HUMAN_PLAY_MAX_CREATED_PER_HOUR", "5")
+    )
+    human_play_max_total_active: int = int(
+        os.environ.get("ARENA_HUMAN_PLAY_MAX_TOTAL_ACTIVE", "8")
+    )
+    # Absolute game lifetime / idle expiry (seconds).
+    human_play_ttl_seconds: int = int(
+        os.environ.get("ARENA_HUMAN_PLAY_TTL_SECONDS", str(24 * 3600))
+    )
+    human_play_idle_seconds: int = int(
+        os.environ.get("ARENA_HUMAN_PLAY_IDLE_SECONDS", str(3600))
+    )
+    # How long the browser may keep polling one game's state.
+    human_play_poll_seconds: float = float(
+        os.environ.get("ARENA_HUMAN_PLAY_POLL_SECONDS", "0.4")
+    )
+
     # Stderr whitelist: substrings that are acceptable in a cutechess child's
     # stderr during a pair run.  Anything else fails verification.
     stderr_whitelist: tuple = field(
@@ -121,6 +162,15 @@ class Settings:
     @property
     def api_port(self) -> int:
         return int(os.environ.get("ARENA_API_PORT", "8787"))
+
+    def human_play_opponent_refs(self) -> tuple[str, ...]:
+        """Parsed allowlist refs: ``("preset:...", "channel:...", ...)``."""
+        refs = []
+        for chunk in self.human_play_opponents.split(","):
+            ref = chunk.strip()
+            if ref:
+                refs.append(ref)
+        return tuple(refs)
 
 
 def get_settings() -> Settings:

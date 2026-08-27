@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.egg-info/
+.venv/
 
 # Frontend build output (committed artifact lives in chessarena/static/replay-app)
 node_modules/

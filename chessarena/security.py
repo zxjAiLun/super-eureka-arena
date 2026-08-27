@@ -88,3 +88,18 @@ def validate_csrf_token(request: Request, form_fields: dict) -> None:
     token = form_fields.get("_csrf_token")
     if not expected or not token or token != expected:
         raise HTTPException(status_code=403, detail="invalid CSRF token")
+
+
+def validate_csrf_header(request: Request) -> None:
+    """Validate the ``X-CSRF-Token`` header against this browser's cookie.
+
+    Same double-submit contract as ``validate_csrf_token`` but for JSON API
+    clients (e.g. the human-play React app): the token is injected into the
+    page as a data attribute (the cookie itself is HttpOnly and unreadable
+    from JS) and echoed back on every state-changing request.  Used together
+    with ``require_same_origin`` — never instead of it.
+    """
+    expected = getattr(request.state, "csrf_token", None)
+    token = request.headers.get("X-CSRF-Token")
+    if not expected or not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=403, detail="invalid CSRF token")
