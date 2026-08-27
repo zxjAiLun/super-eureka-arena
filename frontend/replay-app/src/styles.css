@@ -432,3 +432,249 @@ main {
     width: min(100%, calc(100vh - 210px));
   }
 }
+
+/* ---------------------------------------------------------------------------
+ * Human vs Engine play
+ * -------------------------------------------------------------------------*/
+.hp-root {
+  height: 100%;
+  min-height: 0;
+}
+
+.hp-lobby {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.9rem;
+  max-width: 24rem;
+  margin: 0 auto;
+  color: #e6edf3;
+}
+
+.hp-lobby-title {
+  margin: 0;
+  font-size: 1.3rem;
+  font-weight: 600;
+}
+
+.hp-lobby-note {
+  margin: 0;
+  color: #8b949e;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+.hp-lobby-strength {
+  margin: 0;
+  color: #8b949e;
+  font-size: 0.8rem;
+}
+
+.hp-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  width: 100%;
+}
+
+.hp-field-label {
+  color: #8b949e;
+  font-size: 0.8rem;
+}
+
+.hp-field select {
+  background: #0d1117;
+  color: #e6edf3;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.95rem;
+}
+
+.hp-start {
+  background: #238636;
+  color: #fff;
+  border: 1px solid rgba(240, 246, 252, 0.1);
+  border-radius: 6px;
+  padding: 0.55rem 1.4rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.hp-start:hover:not(:disabled) {
+  background: #2ea043;
+}
+
+.hp-start:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.hp-main {
+  height: 100%;
+}
+
+.hp-status {
+  font-size: 0.9rem;
+  color: #8b949e;
+  padding: 0.2rem 0.6rem;
+  border-radius: 6px;
+  min-height: 1.4rem;
+}
+
+.hp-status[data-state="your-move"] {
+  color: #3fb950;
+  font-weight: 600;
+}
+
+.hp-status[data-state="engine"] {
+  color: #d29922;
+}
+
+.hp-status[data-state="terminal"] {
+  color: #e6edf3;
+  font-weight: 600;
+}
+
+.hp-side {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.hp-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.hp-resign {
+  background: #21262d;
+  color: #f85149;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.hp-resign:hover:not(:disabled) {
+  border-color: #f85149;
+}
+
+.hp-resign:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.hp-link-button {
+  background: #21262d;
+  color: #58a6ff;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0.4rem 0.9rem;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.hp-link-button:hover {
+  border-color: #58a6ff;
+}
+
+.hp-review-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.hp-review-hint {
+  color: #6b7480;
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.hp-moves-empty {
+  color: #6b7480;
+  font-size: 0.8rem;
+  padding: 0.4rem;
+}
+
+/* Promotion picker overlay ---------------------------------------------*/
+.hp-promo-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(1, 4, 9, 0.75);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+  border-radius: 10px;
+}
+
+.hp-promo {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 0.8rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.hp-promo-title {
+  color: #e6edf3;
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.hp-promo-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.hp-promo-row button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  width: 3rem;
+  height: 3rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hp-promo-row button:hover {
+  border-color: #58a6ff;
+}
+
+.hp-promo-piece {
+  width: 2.2rem;
+  height: 2.2rem;
+  display: inline-block;
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+}
+
+/* Unicode chess glyphs as promotion pieces (no sprite dependency). */
+.hp-promo-piece.w { color: #f0f6fc; }
+.hp-promo-piece.b { color: #8b949e; }
+.hp-promo-piece.q::after { content: "♛"; font-size: 2rem; }
+.hp-promo-piece.r::after { content: "♜"; font-size: 2rem; }
+.hp-promo-piece.b::after { content: "♝"; font-size: 2rem; }
+.hp-promo-piece.n::after { content: "♞"; font-size: 2rem; }
+
+.move-san.active {
+  background: #1f6feb33;
+  border-radius: 4px;
+  color: #58a6ff;
+}
