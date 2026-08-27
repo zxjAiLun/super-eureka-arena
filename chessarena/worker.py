@@ -53,22 +53,68 @@ def _start_analysis_if_queued(
     return thread
 
 
+def _service_human_move(settings: Settings, session_factory) -> bool:
+    """Execute at most one pending human-play engine move.
+
+    Called between scheduler ticks ONLY when no cutechess pair is running.
+    The scheduler is then re-polled immediately afterwards so a queued match
+    still starts on the very next tick — a human move merely inserts a
+    1-2 second gap between pairs, it never computes concurrently with a
+    timed match (CPU isolation contract).
+    """
+    from .models import HumanGame
+    from .services import human_engine
+
+    try:
+        with session_factory() as session:
+            game = human_engine.next_pending_game(session)
+            if game is None:
+                return False
+            game_id = game.id
+        with session_factory() as session:
+            game = session.get(HumanGame, game_id)
+            if game is None:
+                return False
+            action = human_engine.service_pending_move(settings, session, game)
+        if action and not action.startswith("human-move skipped"):
+            logger.info("human-play: %s", action)
+        return True
+    except Exception:
+        logger.exception("human-play move servicing failed")
+        return False
+
+
 def _worker_step(settings, session_factory, scheduler, analysis_thread):
-    """One iteration of match/analysis arbitration (P4.7 repair).
+    """One iteration of match/human-play/analysis arbitration.
 
-    Contract: matches always win; analysis only runs while the match queue is
-    idle, and once an analysis game has started it finishes before the worker
-    services a queued match — the scheduler is not ticked (it would launch a
-    new CuteChess pair) while the analysis thread is alive.
-
-    Returns ``(action, analysis_thread)`` where action is the scheduler tick
-    result, "analysis-running", "analysis-started" or "idle".
+    Contract: the RUNNING pair always finishes first; between pairs, at most
+    ONE pending human-play engine move is serviced before the next queued
+    pair launches (a 1-2 second gap, never concurrent computation); the
+    scheduler is then re-polled immediately so a queued match starts on the
+    very next tick.  Post-game analysis stays last-priority.  No two
+    CPU-heavy workloads ever overlap — the experiment-correctness invariant
+    of the Arena.
     """
     if analysis_thread is not None and analysis_thread.is_alive():
         # A game analysis is in flight: matches wait for it to finish.  This
         # keeps the analyzer (Threads=2, 256 MB) from sharing CPU with a
         # timed match, which would pollute measured strength.
         return "analysis-running", analysis_thread
+    if getattr(scheduler, "active_proc", None) is not None:
+        # A timed pair is running: it wins unconditionally.  Human-play
+        # moves keep waiting (the browser keeps polling).
+        action = scheduler.tick()
+        return action, analysis_thread
+    # Between pairs: service one pending human move BEFORE launching the
+    # next pair (bounded delay, zero concurrent computation).  Skipped when
+    # the feature is disabled or settings are unavailable (test doubles).
+    if (
+        settings is not None
+        and session_factory is not None
+        and settings.human_play_enabled
+        and _service_human_move(settings, session_factory)
+    ):
+        return "human-move", analysis_thread
     action = scheduler.tick()
     if action != "idle":
         return action, analysis_thread
