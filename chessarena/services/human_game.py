@@ -72,6 +72,10 @@ def _client_ip(request) -> str:
 
 
 def _enforce_limits(session: Session, settings: Settings, ip: str) -> None:
+    # P1-2 repair: bulk lazy expiry FIRST.  Abandoned ACTIVE rows (browser
+    # closed, never revisited) must free their cap slots; otherwise the
+    # global cap turns into a permanent 503 for everyone.
+    expire_stale_active_games(session)
     now = utcnow()
     active_total = (
         session.query(HumanGame)
@@ -131,6 +135,42 @@ def apply_lazy_expiry(session: Session, game: HumanGame) -> HumanGame:
     return game
 
 
+def expire_stale_active_games(session: Session) -> int:
+    """Bulk lazy expiry: expire every ACTIVE row already past its TTL or
+    idle deadline, without needing the owning browser to come back.
+
+    Without this, abandoned ACTIVE rows count against the global/per-IP
+    caps forever (8 stuck rows == permanent 503 for everyone).  The ACTIVE
+    set is bounded small by the caps, so a full scan is cheap.  Returns the
+    number of rows expired; the caller commits.
+    """
+    expired = 0
+    for game in session.query(HumanGame).filter(
+        HumanGame.status == HUMAN_GAME_ACTIVE
+    ).all():
+        before = game.status
+        apply_lazy_expiry(session, game)
+        if game.status != before:
+            expired += 1
+    return expired
+
+
+def game_is_stale(game: HumanGame) -> bool:
+    """True when an ACTIVE game is already past TTL/idle (checked without
+    mutating anything), so the worker never spawns an engine for a dead
+    game."""
+    if game.status != HUMAN_GAME_ACTIVE:
+        return False
+    now = utcnow()
+    expires_at = coerce_utc(game.expires_at)
+    idle_expires_at = coerce_utc(game.idle_expires_at)
+    if expires_at is not None and now >= expires_at:
+        return True
+    if idle_expires_at is not None and now >= idle_expires_at:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Creation
 # ---------------------------------------------------------------------------
@@ -147,6 +187,9 @@ def create_game(
         raise HumanPlayError("human play is disabled", 404)
     ip = _client_ip(request)
     _enforce_limits(session, settings, ip)
+    # _enforce_limits may have bulk-expired stale rows; persist that before
+    # inserting the new game so the freed slots survive a later rollback.
+    session.commit()
 
     try:
         choice = resolve_opponent(
@@ -167,7 +210,11 @@ def create_game(
         status=HUMAN_GAME_ACTIVE,
         current_fen=board.fen(),
         revision=0,
-        engine_pending=False,
+        # P1-1 repair: the start position is ALWAYS white-to-move, so a
+        # human playing black owes the engine's first move from creation.
+        # Without this the game is unstartable: the human can never move
+        # ("not your turn") and the worker never services a non-pending row.
+        engine_pending=(human_color == "black"),
         creator_ip=ip,
         created_at=now,
         last_move_at=now,
@@ -184,10 +231,13 @@ def create_game(
 # Auth + fetch
 # ---------------------------------------------------------------------------
 def authorize(game: HumanGame, token: str | None) -> HumanGame:
-    if not token:
-        raise HumanPlayError("missing game token", 401)
-    if not secrets.compare_digest(hash_token(token), game.game_token_hash):
-        raise HumanPlayError("invalid game token", 401)
+    """Token check.  Every failure (missing / invalid token / unknown game
+    id) raises the SAME status and detail so the response body never leaks
+    whether a game UUID exists."""
+    if not token or not secrets.compare_digest(
+        hash_token(token), game.game_token_hash
+    ):
+        raise HumanPlayError("unauthorized", 401)
     return game
 
 
@@ -195,8 +245,8 @@ def get_game(session: Session, settings: Settings, game_id: str,
              token: str | None) -> HumanGame:
     game = session.query(HumanGame).filter(HumanGame.id == game_id).first()
     if game is None:
-        # Indistinguishable from a token failure: never confirm game ids.
-        raise HumanPlayError("game not found", 401)
+        # Same status AND detail as a token failure: never confirm game ids.
+        raise HumanPlayError("unauthorized", 401)
     authorize(game, token)
     apply_lazy_expiry(session, game)
     session.commit()

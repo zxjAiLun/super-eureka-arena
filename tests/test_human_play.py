@@ -952,18 +952,383 @@ def test_human_move_prioritized_over_next_queued_pair(
                 session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
             )
         scheduler = Scheduler(hp_settings, engine_factory)
-        # First step: the human move must be answered, NOT the pair launched.
+        # First step: the human move is answered AND (same tick) the queued
+        # pair launches — a stream of pending human moves can never starve
+        # a queued tournament (P1-4).
         action, _ = _worker_step(hp_settings, engine_factory, scheduler, None)
-        assert action == "human-move"
+        assert action.startswith("human-move + launched pair"), (
+            f"unexpected action: {action!r}"
+        )
         with engine_factory() as session:
             game = session.get(HumanGame, gid)
             assert game.engine_pending is False
-        assert scheduler.active_proc is None  # no pair started yet
-        # Second step: now the queued pair launches.
-        action, _ = _worker_step(hp_settings, engine_factory, scheduler, None)
-        assert action.startswith("launched pair"), (
-            f"unexpected action: {action!r}"
-        )
+        assert scheduler.active_proc is not None  # pair launched same tick
         scheduler.shutdown()
     finally:
         human_engine.ask_engine_move = orig
+
+
+# ---------------------------------------------------------------------------
+# H6 closure repairs (P1/P2 regressions from the cloud review)
+# ---------------------------------------------------------------------------
+def test_black_start_engine_moves_first(hp_settings, engine_factory,
+                                        hp_registered):
+    """P1-1: human as black -> engine_pending=True at creation; the worker
+    plays the opening white move, not the human."""
+    _use_fake_engine(engine_factory)
+    with engine_factory() as session:
+        game, token = human_game.create_game(
+            session, hp_settings, _FakeRequest(),
+            "preset:stockfish-limited-1800", "black",
+        )
+        gid = game.id
+        assert game.engine_pending is True
+        assert game.revision == 0
+        payload = human_game.game_payload(game)
+        assert payload["side_to_move"] == "white"
+    with engine_factory() as session:
+        action = human_engine.service_pending_move(
+            hp_settings, session, session.get(HumanGame, gid)
+        )
+        assert "played" in action, action
+    with engine_factory() as session:
+        game = session.get(HumanGame, gid)
+        assert game.engine_pending is False
+        assert game.revision == 1
+        moves = (
+            session.query(HumanGameMove)
+            .filter(HumanGameMove.human_game_id == gid)
+            .order_by(HumanGameMove.ply)
+            .all()
+        )
+        assert len(moves) == 1
+        assert moves[0].side == "engine"
+        assert moves[0].ply == 1
+        payload = human_game.game_payload(game)
+        assert payload["side_to_move"] == "black"
+
+
+def test_black_start_via_api_worker_roundtrip(page, hp_settings,
+                                              engine_factory, hp_registered):
+    """P1-1 end-to-end: black game created via the API is immediately
+    pending and the worker supplies white's first move."""
+    _use_fake_engine(engine_factory)
+    r = _create(page, color="black")
+    assert r.status_code == 201
+    body = r.json()
+    assert body["engine_pending"] is True
+    assert body["side_to_move"] == "white"
+    gid, token = body["id"], body["game_token"]
+    with engine_factory() as session:
+        action = human_engine.service_pending_move(
+            hp_settings, session, session.get(HumanGame, gid)
+        )
+        assert "played" in action
+    r2 = page.get(
+        f"/chessarena/public-api/v1/human-play/games/{gid}",
+        headers={"X-Game-Token": token},
+    )
+    out = r2.json()
+    assert out["engine_pending"] is False
+    assert out["side_to_move"] == "black"
+    assert out["moves"][0]["side"] == "engine"
+
+
+def test_stale_active_rows_do_not_block_creation(
+    page, hp_settings, engine_factory, hp_registered
+):
+    """P1-2: fill the global ACTIVE cap with abandoned games, push their
+    deadlines into the past WITHOUT touching them, then create a new game —
+    the bulk lazy expiry must free the slots (no 503)."""
+    cap = hp_settings.human_play_max_total_active
+    with engine_factory() as session:
+        for i in range(cap):
+            game, token = human_game.create_game(
+                session, hp_settings, _FakeRequest(ip=f"203.0.113.{i}"),
+                "preset:stockfish-limited-1800", "white",
+            )
+            game.expires_at = utcnow() - timedelta(seconds=1)
+            game.idle_expires_at = utcnow() - timedelta(seconds=1)
+            session.commit()
+    # A fresh IP; all cap slots are ACTIVE-but-stale.
+    r = page.post(
+        "/chessarena/public-api/v1/human-play/games",
+        json={"opponent": "preset:stockfish-limited-1800",
+              "human_color": "white"},
+        headers={"X-Forwarded-For": "198.51.100.77"},
+    )
+    assert r.status_code == 201, r.text
+    with engine_factory() as session:
+        statuses = [
+            s for (s,) in session.query(HumanGame.status).all()
+        ]
+        assert statuses.count("EXPIRED") == cap
+        assert statuses.count("ACTIVE") == 1
+
+
+def test_expired_pending_row_never_spawns_engine(
+    hp_settings, engine_factory, hp_registered
+):
+    """P1-2b: a pending game past its idle deadline must not be picked up by
+    next_pending_game — no engine spawn for a dead game."""
+    spawned = {"n": 0}
+    orig = human_engine.ask_engine_move
+
+    def spy(snapshot, moves, movetime_ms):
+        spawned["n"] += 1
+        return orig(snapshot, moves, movetime_ms)
+
+    with engine_factory() as session:
+        game, token = human_game.create_game(
+            session, hp_settings, _FakeRequest(),
+            "preset:stockfish-limited-1800", "white",
+        )
+        gid = game.id
+        human_game.submit_human_move(
+            session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
+        )
+        # Push the idle deadline into the past without re-visiting the game.
+        session.expire_all()
+        game = session.get(HumanGame, gid)
+        game.idle_expires_at = utcnow() - timedelta(seconds=1)
+        session.commit()
+
+    human_engine.ask_engine_move = spy
+    try:
+        with engine_factory() as session:
+            picked = human_engine.next_pending_game(session)
+            assert picked is None
+            game = session.get(HumanGame, gid)
+            assert game.status == "EXPIRED"  # lazily expired in place
+            assert game.engine_pending is False
+        assert spawned["n"] == 0
+    finally:
+        human_engine.ask_engine_move = orig
+
+
+def test_resign_during_engine_search_discards_late_bestmove(
+    hp_settings, engine_factory, hp_registered
+):
+    """P1-3: resign lands while the engine is 'thinking'; the late bestmove
+    must lose the CAS and be discarded entirely."""
+    from chessarena.services.human_game import resign_game
+
+    def slow_ask(snapshot, moves, movetime_ms):
+        # Mid-search: the browser resigns via a SECOND session.
+        with engine_factory() as other:
+            resign_game(
+                other, hp_settings, other.get(HumanGame, gid)
+            )
+        return "g8f6", 900
+
+    with engine_factory() as session:
+        game, token = human_game.create_game(
+            session, hp_settings, _FakeRequest(),
+            "preset:stockfish-limited-1800", "white",
+        )
+        gid = game.id
+        human_game.submit_human_move(
+            session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
+        )
+
+    orig = human_engine.ask_engine_move
+    human_engine.ask_engine_move = slow_ask
+    try:
+        with engine_factory() as session:
+            action = human_engine.service_pending_move(
+                hp_settings, session, session.get(HumanGame, gid)
+            )
+        assert "state changed while engine was thinking" in action, action
+    finally:
+        human_engine.ask_engine_move = orig
+
+    with engine_factory() as session:
+        game = session.get(HumanGame, gid)
+        assert game.status == "RESIGNED"
+        assert game.result == "0-1"
+        assert game.termination == "resign"
+        # Only the human move bumped the revision; the resigned game never
+        # saw the discarded engine reply.
+        assert game.revision == 1
+        moves = (
+            session.query(HumanGameMove)
+            .filter(HumanGameMove.human_game_id == gid)
+            .order_by(HumanGameMove.ply)
+            .all()
+        )
+        assert [m.side for m in moves] == ["human"]  # no engine move
+        # PGN (written at resign time) matches the DB move log exactly.
+        text = human_game.ensure_pgn(session, hp_settings, game)
+    assert "1. e4 0-1" in text
+    assert "Nf6" not in text
+
+
+def test_cas_rejects_duplicate_servicing(hp_settings, engine_factory,
+                                         hp_registered):
+    """P1-3b: the same pending move serviced twice (stale revision) — the
+    second write must lose the CAS, leaving exactly one engine move."""
+    calls = {"n": 0}
+
+    def fake_ask(snapshot, moves, movetime_ms):
+        calls["n"] += 1
+        return "g8f6", 50
+
+    orig = human_engine.ask_engine_move
+    human_engine.ask_engine_move = fake_ask
+    try:
+        with engine_factory() as session:
+            game, token = human_game.create_game(
+                session, hp_settings, _FakeRequest(),
+                "preset:stockfish-limited-1800", "white",
+            )
+            gid = game.id
+            human_game.submit_human_move(
+                session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
+            )
+        # First service wins.
+        with engine_factory() as session:
+            action = human_engine.service_pending_move(
+                hp_settings, session, session.get(HumanGame, gid)
+            )
+            assert "played" in action
+        # Second service with the SAME pre-read state: engine_pending is
+        # already False, so it must be skipped outright.
+        with engine_factory() as session:
+            game = session.get(HumanGame, gid)
+            action = human_engine.service_pending_move(
+                hp_settings, session, game
+            )
+            assert "skipped" in action
+        with engine_factory() as session:
+            moves = (
+                session.query(HumanGameMove)
+                .filter(HumanGameMove.human_game_id == gid)
+                .order_by(HumanGameMove.ply)
+                .all()
+            )
+            assert [m.side for m in moves] == ["human", "engine"]
+            assert game.revision == 2
+    finally:
+        human_engine.ask_engine_move = orig
+    assert calls["n"] == 1  # the engine never ran twice
+
+
+def test_two_pending_humans_do_not_starve_queued_pair(
+    hp_settings, engine_factory, hp_registered, tournament_factory
+):
+    """P1-4: two pending human games + one QUEUED tournament — a single
+    _worker_step must service exactly ONE human reply and still launch the
+    pair in the same tick."""
+    from chessarena.services.scheduler import Scheduler
+    from chessarena.worker import _worker_step
+
+    def fake_ask(snapshot, moves, movetime_ms):
+        return "g8f6", 30
+
+    orig = human_engine.ask_engine_move
+    human_engine.ask_engine_move = fake_ask
+    try:
+        tournament_factory(name="queued match", pairs=1, status="QUEUED")
+        gids = []
+        with engine_factory() as session:
+            for _ in range(2):
+                game, token = human_game.create_game(
+                    session, hp_settings,
+                    _FakeRequest(ip=f"203.0.113.{len(gids) + 50}"),
+                    "preset:stockfish-limited-1800", "white",
+                )
+                human_game.submit_human_move(
+                    session, hp_settings, session.get(HumanGame, game.id),
+                    "e2e4", 0,
+                )
+                gids.append(game.id)
+        scheduler = Scheduler(hp_settings, engine_factory)
+        action, _ = _worker_step(hp_settings, engine_factory, scheduler, None)
+        assert action.startswith("human-move + launched pair"), action
+        assert scheduler.active_proc is not None
+        with engine_factory() as session:
+            pendings = [
+                session.get(HumanGame, g).engine_pending for g in gids
+            ]
+            # Exactly one serviced; the other still waits for the pair.
+            assert sorted(pendings) == [False, True]
+        scheduler.shutdown()
+    finally:
+        human_engine.ask_engine_move = orig
+
+
+def test_auth_401_bodies_identical(page):
+    """P2-1: unknown game / bad token / missing token must return the SAME
+    status AND body — never leak whether a UUID exists."""
+    r = _create(page)
+    gid = r.json()["id"]
+
+    def _body(resp):
+        return resp.status_code, resp.json()
+
+    missing = _body(page.get(
+        f"/chessarena/public-api/v1/human-play/games/{gid}"
+    ))
+    bad = _body(page.get(
+        f"/chessarena/public-api/v1/human-play/games/{gid}",
+        headers={"X-Game-Token": "0" * 64},
+    ))
+    unknown = _body(page.get(
+        "/chessarena/public-api/v1/human-play/games/"
+        "00000000-0000-0000-0000-000000000000",
+        headers={"X-Game-Token": "whatever"},
+    ))
+    assert missing == bad == unknown
+    assert missing[0] == 401
+    assert missing[1] == {"detail": "unauthorized"}
+
+
+def test_movetime_config_bounds(hp_settings):
+    """P2-2: the shared test settings stay inside the hard-cap range, and
+    Settings() rejects values outside 100..3000."""
+    assert 100 <= hp_settings.human_play_movetime_ms <= 3000
+    from chessarena.config import Settings
+
+    for bad in (50, 99, 3001, 600000):
+        with pytest.raises(ValueError):
+            Settings(human_play_movetime_ms=bad)
+    # Boundary values are legal.
+    for ok in (100, 1000, 3000):
+        Settings(human_play_movetime_ms=ok)
+
+
+def test_malformed_bestmove_terminalizes_not_hotloop(
+    hp_settings, engine_factory, hp_registered
+):
+    """P2-3: an engine emitting 'bestmove garbage' must end the game as
+    ENGINE_FAILED; engine_pending must not stay true (no retry loop)."""
+    with engine_factory() as session:
+        game, token = human_game.create_game(
+            session, hp_settings, _FakeRequest(),
+            "preset:stockfish-limited-1800", "white",
+        )
+        gid = game.id
+        human_game.submit_human_move(
+            session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
+        )
+
+    def garbage_ask(snapshot, moves, movetime_ms):
+        return "garbage!!", 10
+
+    orig = human_engine.ask_engine_move
+    human_engine.ask_engine_move = garbage_ask
+    try:
+        with engine_factory() as session:
+            action = human_engine.service_pending_move(
+                hp_settings, session, session.get(HumanGame, gid)
+            )
+            assert "malformed bestmove" in action, action
+    finally:
+        human_engine.ask_engine_move = orig
+
+    with engine_factory() as session:
+        game = session.get(HumanGame, gid)
+        assert game.status == "ENGINE_FAILED"
+        assert game.engine_pending is False
+        # The dead game is never picked up again.
+        assert human_engine.next_pending_game(session) is None

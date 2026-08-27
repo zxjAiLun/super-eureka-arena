@@ -172,6 +172,18 @@ class Settings:
                 refs.append(ref)
         return tuple(refs)
 
+    def __post_init__(self) -> None:
+        # P2-2: the engine movetime is a server-side HARD CAP, not merely a
+        # default — an operator typo (e.g. 600000) must fail fast at startup
+        # instead of silently letting anonymous play pin the CPU for minutes
+        # per move.  Range matches the frozen MVP contract.
+        movetime = self.human_play_movetime_ms
+        if not (100 <= movetime <= 3000):
+            raise ValueError(
+                "ARENA_HUMAN_PLAY_MOVETIME_MS must be between 100 and 3000 "
+                f"ms (hard cap), got {movetime}"
+            )
+
 
 def get_settings() -> Settings:
     return Settings()

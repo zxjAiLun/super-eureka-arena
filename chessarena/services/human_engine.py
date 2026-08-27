@@ -26,6 +26,7 @@ from pathlib import Path
 import chess
 
 from ..models import HumanGame, HumanGameMove, utcnow
+from .human_game import game_is_stale
 
 
 class EngineReplyError(RuntimeError):
@@ -181,16 +182,40 @@ def ask_engine_move(snapshot: dict, moves_uci: list[str],
 
 
 def next_pending_game(session) -> HumanGame | None:
-    """The oldest ACTIVE game with a pending engine move (FIFO)."""
-    return (
+    """The oldest ACTIVE game with a pending engine move (FIFO), skipping
+    rows already past TTL/idle — an expired game must never spawn an engine
+    even before its owning browser triggers lazy expiry."""
+    rows = (
         session.query(HumanGame)
         .filter(
             HumanGame.status == "ACTIVE",
             HumanGame.engine_pending.is_(True),
         )
         .order_by(HumanGame.last_move_at.asc())
-        .first()
+        .all()
     )
+    for row in rows:
+        if game_is_stale(row):
+            # Lazily expire in place so it stops being returned.
+            row.status = "EXPIRED"
+            row.termination = (
+                "ttl_expired"
+                if _past(row.expires_at)
+                else "idle_expired"
+            )
+            row.engine_pending = False
+            row.result = None
+            session.add(row)
+        else:
+            return row
+    return None
+
+
+def _past(dt) -> bool:
+    from ..models import coerce_utc
+
+    dt = coerce_utc(dt)
+    return dt is not None and utcnow() >= dt
 
 
 def _moves_uci(session, game: HumanGame) -> list[str]:
@@ -203,18 +228,58 @@ def _moves_uci(session, game: HumanGame) -> list[str]:
     return [r.uci for r in rows]
 
 
+def _fail_game(session, game_id: str, reason: str) -> None:
+    """Mark a game ENGINE_FAILED via conditional update (never resurrects a
+    row that already left ACTIVE, e.g. via resign/expiry while the engine
+    was thinking)."""
+    from sqlalchemy import update
+
+    stmt = (
+        update(HumanGame)
+        .where(
+            HumanGame.id == game_id,
+            HumanGame.status == "ACTIVE",
+        )
+        .values(
+            status="ENGINE_FAILED",
+            termination="engine_error",
+            result=None,
+            engine_pending=False,
+        )
+    )
+    session.execute(stmt)
+    session.commit()
+
+
 def service_pending_move(settings, session, game: HumanGame) -> str:
     """Execute one owed engine move for ``game`` and persist it.
 
-    Returns a short action description for the worker log.  The game may have
-    been expired/resigned between the query and this call — everything is
-    re-checked under the row's own state, and a stale game is skipped without
-    spawning any process.
+    Returns a short action description for the worker log.
+
+    Concurrency contract (P1-3 repair): the engine search runs for up to
+    ~movetime seconds OUTSIDE any transaction.  During that window the
+    browser may resign, the game may expire, or another writer may touch
+    the row.  The persisted move therefore uses a compare-and-swap UPDATE
+    conditioned on the exact (status=ACTIVE, engine_pending=true,
+    revision=expected) state observed BEFORE the search; a late bestmove
+    that loses the CAS is discarded, never appended to a resigned/expired
+    game and never overwrites its result.
     """
     game = session.get(HumanGame, game.id)
     if game is None or game.status != "ACTIVE" or not game.engine_pending:
         return "human-move skipped (game no longer pending)"
+    if game_is_stale(game):
+        game.status = "EXPIRED"
+        game.termination = (
+            "ttl_expired" if _past(game.expires_at) else "idle_expired"
+        )
+        game.engine_pending = False
+        game.result = None
+        session.commit()
+        return "human-move skipped (game expired)"
 
+    expected_revision = game.revision or 0
+    game_id = game.id
     snapshot = game.opponent_snapshot or {}
     moves = _moves_uci(session, game)
     board = chess.Board()
@@ -225,11 +290,7 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
             # Should be impossible (every stored move was validated on
             # accept); fail the game rather than spawn an engine on a
             # corrupt history.
-            game.status = "ENGINE_FAILED"
-            game.termination = "engine_error"
-            game.result = None
-            game.engine_pending = False
-            session.commit()
+            _fail_game(session, game_id, "corrupt history")
             return f"human-move failed: corrupt history ({exc})"
 
     if board.is_game_over():
@@ -244,57 +305,87 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
             snapshot, moves, settings.human_play_movetime_ms
         )
     except EngineReplyError as exc:
-        game.engine_pending = False
-        game.status = "ENGINE_FAILED"
-        game.termination = "engine_error"
-        game.result = None
-        session.commit()
+        _fail_game(session, game_id, str(exc))
         return f"human-move engine failed: {exc}"
 
-    move = chess.Move.from_uci(best_uci)
+    # P2-3 repair: a malformed bestmove (e.g. "bestmove garbage") must
+    # terminalize the game, not bubble up as an unhandled ValueError that
+    # leaves engine_pending=true and hot-loops the worker.
+    try:
+        move = chess.Move.from_uci(best_uci)
+    except ValueError:
+        _fail_game(session, game_id, f"malformed bestmove: {best_uci!r}")
+        return f"human-move engine failed: malformed bestmove {best_uci!r}"
     if move not in board.legal_moves:
         # A frozen engine replying outside the rules is treated as an engine
         # failure, never silently substituted.
-        game.engine_pending = False
-        game.status = "ENGINE_FAILED"
-        game.termination = "engine_error"
-        game.result = None
-        session.commit()
+        _fail_game(session, game_id, f"illegal bestmove: {best_uci}")
         return "human-move engine failed: illegal bestmove"
 
     san = board.san(move)
     board.push(move)
     ply = len(moves) + 1
-    session.add(
-        HumanGameMove(
-            human_game_id=game.id,
-            ply=ply,
-            side="engine",
-            uci=best_uci,
-            san=san,
-            fen_after=board.fen(),
-            engine_ms=elapsed_ms,
-        )
-    )
-    game.current_fen = board.fen()
-    game.engine_pending = False
-    game.revision = (game.revision or 0) + 1
-    game.last_move_at = utcnow()
-    game.idle_expires_at = utcnow() + _timedelta(
-        settings.human_play_idle_seconds
-    )
-
+    fen_after = board.fen()
     outcome = board.outcome()
+    now = utcnow()
+
+    # --- CAS: only the writer that still owns the pre-search state wins.
+    from sqlalchemy import update
+
+    cas = update(HumanGame).where(
+        HumanGame.id == game_id,
+        HumanGame.status == "ACTIVE",
+        HumanGame.engine_pending.is_(True),
+        HumanGame.revision == expected_revision,
+    )
     if outcome is not None:
-        game.status = "FINISHED"
-        game.result = outcome.result()
-        game.termination = (
+        new_status = "FINISHED"
+        new_result = outcome.result()
+        new_termination = (
             outcome.termination.name.lower()
             if outcome.termination is not None
             else "adjudicated"
         )
+    else:
+        new_status = "ACTIVE"
+        new_result = None
+        new_termination = None
+    result = session.execute(
+        cas.values(
+            current_fen=fen_after,
+            engine_pending=False,
+            revision=expected_revision + 1,
+            last_move_at=now,
+            idle_expires_at=now
+            + _timedelta(settings.human_play_idle_seconds),
+            status=new_status,
+            result=new_result,
+            termination=new_termination,
+        )
+    )
+    if result.rowcount != 1:
+        # Lost the race (resign / expiry / duplicate servicing).  Discard
+        # the late bestmove entirely.
+        session.rollback()
+        return (
+            "human-move skipped (state changed while engine was thinking)"
+        )
+
+    session.add(
+        HumanGameMove(
+            human_game_id=game_id,
+            ply=ply,
+            side="engine",
+            uci=best_uci,
+            san=san,
+            fen_after=fen_after,
+            engine_ms=elapsed_ms,
+        )
+    )
     session.commit()
-    return f"human-move played: game={game.id} ply={ply} uci={best_uci}"
+    return (
+        f"human-move played: game={game_id} ply={ply} uci={best_uci}"
+    )
 
 
 def _timedelta(seconds: int):

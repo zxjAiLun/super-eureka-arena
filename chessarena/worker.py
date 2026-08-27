@@ -105,15 +105,23 @@ def _worker_step(settings, session_factory, scheduler, analysis_thread):
         # moves keep waiting (the browser keeps polling).
         action = scheduler.tick()
         return action, analysis_thread
-    # Between pairs: service one pending human move BEFORE launching the
-    # next pair (bounded delay, zero concurrent computation).  Skipped when
-    # the feature is disabled or settings are unavailable (test doubles).
-    if (
+    # Between pairs: service at most ONE pending human move, then — in the
+    # SAME tick — poll the scheduler so a queued tournament still launches
+    # immediately.  Returning right after a human reply would let a stream
+    # of pending human moves starve the queued pair indefinitely (P1-4:
+    # arena experiment priority is the core contract).
+    human_serviced = (
         settings is not None
         and session_factory is not None
         and settings.human_play_enabled
         and _service_human_move(settings, session_factory)
-    ):
+    )
+    if human_serviced:
+        action = scheduler.tick()
+        if action != "idle":
+            # Pair launched in the same iteration; any further human
+            # replies wait for the pair boundary like everyone else.
+            return f"human-move + {action}", analysis_thread
         return "human-move", analysis_thread
     action = scheduler.tick()
     if action != "idle":

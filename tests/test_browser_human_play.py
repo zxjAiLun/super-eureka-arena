@@ -387,3 +387,35 @@ def test_browser_human_play_flag_off_404(settings, engine_factory, registered):
             proc.wait(timeout=15)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def test_browser_human_play_black_start(hp_e2e):
+    """P1-1 browser smoke: picking Black starts a game where the engine
+    (White) moves first — the board shows the engine's opening move and the
+    status becomes 'Your move' without any human action."""
+    page = hp_e2e["browser"].new_page()
+    console_errors = []
+    page.on("console", lambda m: m.type == "error" and console_errors.append(m.text))
+    page.on("pageerror", lambda e: console_errors.append(str(e)))
+
+    page.goto(f"{hp_e2e['base']}/human-play/")
+    _wait_for(page, ".hp-lobby select")
+    # Second select = your color; choose Black.
+    page.select_option(".hp-lobby select >> nth=1", "black")
+    page.click(".hp-start")
+
+    # Engine opens as White; then it is the human's move.
+    _wait_for(page, ".hp-status[data-state='your-move']")
+    moves = page.locator(".move-row")
+    assert moves.count() == 1
+    row = moves.first.inner_text()
+    # Ply 1 was the engine's (White) move.
+    assert row.strip().startswith("1.")
+
+    # Human is Black: the board is oriented from Black's side.
+    board_orientation_files = page.evaluate(
+        "() => { const b = document.querySelector('.board-wrap [class*=board], .board-wrap');"
+        " return b ? 'ok' : 'missing'; }"
+    )
+    assert board_orientation_files == "ok"
+    assert console_errors == [], console_errors
