@@ -344,3 +344,62 @@ class LiveOut(BaseModel):
     telemetry_age_s: Optional[int] = None
     white: Optional[LiveSideOut] = None
     black: Optional[LiveSideOut] = None
+
+
+# ---------------------------------------------------------------------------
+# Human vs Engine play (dark launch; anonymous, token-authorized)
+# ---------------------------------------------------------------------------
+class HumanOpponentOut(BaseModel):
+    """One selectable opponent (allowlist entry, whitelisted fields only)."""
+
+    id: str  # the allowlist ref, e.g. "preset:stockfish-limited-2000"
+    display_name: str
+    kind: str  # "stockfish" | "engine"
+    strength_label: Optional[str] = None
+
+
+class HumanGameCreate(BaseModel):
+    opponent: str = Field(min_length=1, max_length=128)
+    human_color: str = Field(pattern="^(white|black)$")
+
+
+class HumanMoveIn(BaseModel):
+    uci: str = Field(pattern="^[a-h][1-8][a-h][1-8][qrbn]?$")
+    expected_revision: int = Field(ge=0)
+
+
+class HumanMoveOut(BaseModel):
+    ply: int
+    side: str  # human | engine
+    uci: str
+    san: str
+    fen_after: str
+    engine_ms: Optional[int] = None
+
+
+class HumanGameOut(BaseModel):
+    """Authoritative game state (requires the per-game secret token).
+
+    Never exposes opponent provenance beyond the display name: no build ids,
+    binary SHAs, paths, UCI options or IP addresses.
+    """
+
+    id: str
+    status: str
+    human_color: str
+    opponent_name: str
+    opponent_kind: str
+    revision: int
+    engine_pending: bool
+    fen: str
+    side_to_move: Optional[str] = None
+    result: Optional[str] = None
+    termination: Optional[str] = None
+    in_check: bool = False
+    moves: List[HumanMoveOut] = Field(default_factory=list)
+
+
+class HumanGameCreateOut(HumanGameOut):
+    """Creation response: carries the secret token exactly once."""
+
+    game_token: str

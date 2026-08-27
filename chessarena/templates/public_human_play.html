@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ChessArena — Play vs Engine</title>
+  <link rel="stylesheet" href="{{ settings.base_path }}/static/style.css">
+  <link rel="stylesheet" href="{{ settings.base_path }}/static/replay-app/assets/index.css">
+  <style>
+    /* Same app-like fixed viewport as the replay page. */
+    html, body { margin: 0; height: 100%; }
+    body { overflow: hidden; background: var(--demo-bg, #161b22); display: flex; flex-direction: column; }
+    .human-play-page { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+    .human-play-header {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0.6rem 1rem;
+      background: var(--demo-card, #1c222b);
+      border-bottom: 1px solid var(--demo-border, #2d343f);
+      color: #e6edf3;
+      font-size: 0.9rem;
+    }
+    .human-play-header a { color: #58a6ff; text-decoration: none; }
+    .human-play-header a:hover { text-decoration: underline; }
+    .human-play-main { flex: 1; min-height: 0; padding: 0.6rem 1rem 0.8rem; }
+    #human-play-root { height: 100%; }
+  </style>
+</head>
+<body>
+  <header>
+    {% include "_nav.html" %}
+  </header>
+  <div class="human-play-page">
+    <header class="human-play-header">
+      <a href="{{ settings.base_path }}/">&larr; Arena</a>
+      <span class="human-play-title">Play vs Engine</span>
+    </header>
+    <main class="human-play-main">
+      <div
+        id="human-play-root"
+        data-base-path="{{ settings.base_path }}"
+        data-csrf-token="{{ csrf_token }}"
+        data-poll-seconds="{{ poll_seconds }}"
+      ></div>
+    </main>
+  </div>
+  <script type="module" src="{{ settings.base_path }}/static/replay-app/assets/index.js"></script>
+</body>
+</html>
