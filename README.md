@@ -34,6 +34,14 @@ See `deploy/bootstrap.md` for the one-time server setup and
 - The `events` table records every lifecycle transition from day one so a v2
   live-spectating layer (SSE, UCI telemetry) can be added without schema
   changes.
+- Human vs Engine play (dark launch, `ARENA_HUMAN_PLAY_ENABLED`): anonymous
+  visitors play the explicitly allowlisted opponents (limited-strength
+  Stockfish presets / promoted engine channels) through the React board at
+  `/human-play/`. The opponent launch config is frozen at game creation; the
+  worker answers each move with a short-lived engine process strictly
+  between timed matches, so measured Arena strength is never polluted by
+  concurrent computation. Games are token-authorized, revision-guarded and
+  exportable as PGN.
 
 ## What v1 deliberately does NOT do
 
