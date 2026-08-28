@@ -55,8 +55,10 @@ from ..models import (
 from ..schemas import (
     EventOut,
     ExperimentConfig,
+    FormalExperimentDraft,
     GameOut,
     PairJobOut,
+    SprtConfig,
     TournamentCreate,
     TournamentDetailOut,
     TournamentOut,
@@ -983,6 +985,309 @@ def _preset_elo_limits(schema: dict) -> dict | None:
     if strength is None or strength.get("type") != "check":
         return None
     return {"min": elo.get("min"), "max": elo.get("max")}
+
+
+# ---------------------------------------------------------------------------
+# V2.2-B: formal experiment wizard (preview -> confirm -> DRAFT)
+# ---------------------------------------------------------------------------
+def _formal_draft_from_form(form: dict) -> "FormalExperimentDraft":
+    seed_raw = (form.get("opening_seed") or "").strip()
+    return FormalExperimentDraft(
+        experiment_id=(form.get("experiment_id") or "").strip(),
+        purpose=(form.get("experiment_purpose") or "").strip(),
+        stage=form.get("experiment_stage") or "",
+        candidate=(form.get("candidate") or "").strip(),
+        elo0=float(form.get("elo0") or 0),
+        elo1=float(form.get("elo1") or 10),
+        alpha=float(form.get("alpha") or 0.05),
+        beta=float(form.get("beta") or 0.05),
+        max_pairs=int(form.get("max_pairs") or 1000),
+        explicit_prior_tournament_ids=[
+            t.strip() for t in
+            (form.get("explicit_prior_tournament_ids") or "").split(",")
+            if t.strip()
+        ],
+        opening_seed=int(seed_raw) if seed_raw else None,
+        opening_set_id=(form.get("opening_set_id") or "").strip(),
+        opening_plies=(
+            int(form["opening_plies"])
+            if (form.get("opening_plies") or "").strip()
+            else None
+        ),
+    )
+
+
+def _resolve_formal_opening_or_error(session, opening_set_id):
+    opening = (
+        session.query(OpeningSet)
+        .filter(
+            OpeningSet.opening_set_id == opening_set_id,
+            OpeningSet.enabled.is_(True),
+        )
+        .first()
+    )
+    if opening is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown or disabled opening set {opening_set_id}",
+        )
+    return opening
+
+
+@admin_router.get(
+    "/admin/experiments/formal/new", response_class=HTMLResponse
+)
+def admin_formal_experiment_new(request: Request,
+                                session: Session = Depends(get_db)):
+    """The formal experiment wizard form. The baseline is not selectable:
+    it is always the current production behind channel:current-final."""
+    from ..services import formal_experiments
+    from ..services.versions import get_channel, get_version
+
+    presets = (
+        session.query(EnginePreset)
+        .filter(EnginePreset.enabled.is_(True))
+        .order_by(EnginePreset.created_at.desc())
+        .all()
+    )
+    versions_list = (
+        session.query(EngineVersion)
+        .filter(EngineVersion.status.in_(("candidate", "experimental")))
+        .order_by(EngineVersion.created_at.desc())
+        .all()
+    )
+    openings = (
+        session.query(OpeningSet)
+        .filter(OpeningSet.enabled.is_(True))
+        .order_by(OpeningSet.created_at.desc())
+        .all()
+    )
+    channel = get_channel(session, formal_experiments.BASELINE_CHANNEL)
+    baseline = get_version(session, channel.engine_version_id) if channel \
+        else None
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "formal_experiment_new.html",
+        {
+            "presets": presets,
+            "candidate_versions": versions_list,
+            "openings": openings,
+            "baseline": baseline,
+            "csrf_token": getattr(request.state, "csrf_token", ""),
+            "settings": request.app.state.settings,
+        },
+    )
+
+
+@admin_router.post(
+    "/admin/experiments/formal/preview",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_same_origin)],
+)
+async def admin_formal_experiment_preview(
+    request: Request, session: Session = Depends(get_db)
+):
+    """PURE-READ preview of the formal plan (zero DB mutation).
+
+    The seed is generated ONCE here when the form leaves it empty and is
+    echoed back; the confirm step must reuse exactly this seed so the
+    created sample equals the previewed sample. The plan digest is the
+    only accepted ticket to create — the confirm POST re-plans from
+    scratch and compares digests.
+    """
+    from ..services import formal_experiments
+
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    try:
+        draft = _formal_draft_from_form(form)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid formal experiment input: {exc}",
+        ) from exc
+    opening = _resolve_formal_opening_or_error(
+        session, draft.opening_set_id)
+
+    seed = draft.opening_seed
+    if seed is None:
+        seed = formal_experiments.generate_opening_seed()
+        draft = draft.model_copy(update={"opening_seed": seed})
+
+    plan = formal_experiments.plan_formal_experiment(
+        session, draft, opening, seed=seed)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "formal_experiment_preview.html",
+        {
+            "plan": dict(plan),
+            "draft": draft,
+            "opening_set_id": draft.opening_set_id,
+            "csrf_token": getattr(request.state, "csrf_token", ""),
+            "settings": request.app.state.settings,
+        },
+    )
+
+
+@admin_router.post(
+    "/admin/experiments/formal/create",
+    response_class=RedirectResponse,
+    dependencies=[Depends(require_same_origin)],
+)
+async def admin_formal_experiment_create(
+    request: Request, session: Session = Depends(get_db)
+):
+    """Create the formal experiment DRAFT — after re-planning everything.
+
+    TOCTOU contract: the POST re-resolves the baseline channel, candidate,
+    opening file, prior runs and the deterministic sample, recomputes the
+    full plan and its digest, and ONLY creates when
+    ``new_digest == preview_digest``. Any drift (promotion happened,
+    preset edited, build disabled, opening file changed, priors changed)
+    returns 409 with zero creation. Creation itself goes through the
+    existing ``create_tournament`` (deterministic freeze) and stays a
+    DRAFT — never auto-started. The formal_protocol provenance block is
+    appended in the SAME transaction.
+    """
+    from ..services import formal_experiments
+
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    try:
+        draft = _formal_draft_from_form(form)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid formal experiment input: {exc}",
+        ) from exc
+    preview_digest = (form.get("plan_digest") or "").strip()
+    if not preview_digest:
+        raise HTTPException(
+            status_code=422, detail="missing plan digest (preview first)")
+
+    opening = _resolve_formal_opening_or_error(
+        session, draft.opening_set_id)
+    if draft.opening_seed is None:
+        raise HTTPException(
+            status_code=422,
+            detail="missing opening seed (preview first)")
+
+    # Re-run the ENTIRE planner from live state.
+    plan = formal_experiments.plan_formal_experiment(
+        session, draft, opening, seed=draft.opening_seed)
+    if not plan.ok:
+        raise HTTPException(
+            status_code=422,
+            detail="; ".join(plan["errors"]),
+        )
+    if plan["plan_digest"] != preview_digest:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Formal experiment plan changed since the preview "
+                "(baseline/promotion, candidate identity, opening file, "
+                "or prior runs drifted); preview again."
+            ),
+        )
+
+    # Build the TournamentCreate through the existing creation path.
+    from ..schemas import ExperimentConfig, SprtConfig
+
+    body = TournamentCreate(
+        name=draft.experiment_id,
+        engine_a=(
+            {"version_id": plan["candidate"]["ref"]}
+            if plan["candidate"]["kind"] == "version"
+            else {"preset_id": plan["candidate"]["ref"]}
+        ),
+        # Baseline: ALWAYS the current production version, resolved by the
+        # planner (never user input).
+        engine_b={"version_id": plan["baseline"]["ref"]},
+        opening_set_id=draft.opening_set_id,
+        opening_plies=draft.opening_plies,
+        opening_seed=draft.opening_seed,
+        time_control="blitz_10_01",
+        pairs=draft.max_pairs,
+        allow_intentional_self_play=False,
+        arena_elo_enabled=False,  # formal SPRT never pollutes Arena Elo
+        sprt=SprtConfig(
+            enabled=True,
+            unit="pair",
+            model="pentanomial",
+            elo_model="logistic",
+            elo0=draft.elo0,
+            elo1=draft.elo1,
+            alpha=draft.alpha,
+            beta=draft.beta,
+            max_pairs=draft.max_pairs,
+        ),
+        experiment=ExperimentConfig(
+            experiment_id=draft.experiment_id,
+            purpose=draft.purpose,
+            stage=draft.stage,
+        ),
+        opening_exclude_fens=[
+            # the excluded FENs are recomputed deterministically from the
+            # same prior sources; they are identical to the preview's by
+            # construction (the digest covers them)
+        ],
+    )
+    # Recover the exact excluded FENs the plan computed: recompute them the
+    # same way so create_tournament's selection is byte-identical.
+    excluded_fens = _formal_excluded_fens(session, draft)
+    body = body.model_copy(update={"opening_exclude_fens": excluded_fens})
+
+    created = create_tournament(body, session, request.app.state.settings)
+    session.flush()
+    # Append the formal protocol provenance IN THE SAME TRANSACTION
+    # (create_tournament only flushes; the route's request transaction
+    # commits on success).
+    t = session.query(Tournament).filter(
+        Tournament.id == created["id"]).one()
+    snap = dict(t.config_snapshot or {})
+    snap["formal_protocol"] = {
+        "schema_version":
+            formal_experiments.FORMAL_PROTOCOL_SCHEMA_VERSION,
+        "baseline_channel": formal_experiments.BASELINE_CHANNEL,
+        "automatic_prior_tournament_ids":
+            plan["automatic_prior_tournament_ids"],
+        "explicit_prior_tournament_ids":
+            plan["explicit_prior_tournament_ids"],
+        "excluded_fens_count": plan["excluded_fens_count"],
+        "excluded_fens_sha256": plan["excluded_fens_sha256"],
+        "selected_indices_sha256":
+            plan["opening"]["selected_indices_sha256"],
+        "plan_digest": plan["plan_digest"],
+    }
+    t.config_snapshot = snap
+    session.flush()
+    return RedirectResponse(
+        url=(
+            f"{request.app.state.settings.base_path}/admin/tournaments/"
+            f"{created['id']}"
+        ),
+        status_code=303,
+    )
+
+
+def _formal_excluded_fens(session, draft) -> list[str]:
+    """Recompute the excluded FENs from the same prior sources the planner
+    used (identical result — the digest covers both)."""
+    from ..services import formal_experiments
+    from ..services.formal_experiments import (
+        _prior_opening_fens, _prior_runs_for_experiment,
+    )
+
+    sources: list[Tournament] = []
+    for tid in draft.explicit_prior_tournament_ids:
+        t = session.get(Tournament, tid)
+        if t is not None:
+            sources.append(t)
+    sources.extend(_prior_runs_for_experiment(session, draft.experiment_id))
+    fens: set[str] = set()
+    for t in sources:
+        fens.update(_prior_opening_fens(session, t))
+    return sorted(fens)
 
 
 @admin_router.get("/admin/tournaments/new", response_class=HTMLResponse)

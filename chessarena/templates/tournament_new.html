@@ -2,6 +2,10 @@
 {% block title %}ChessArena · New match{% endblock %}
 {% block content %}
 <h1>Create match</h1>
+<p class="muted">
+  Need a confirmation/promotion SPRT with verified contracts?
+  <a class="action-link" href="{{ settings.base_path }}/admin/experiments/formal/new">Formal Experiment Wizard</a>
+</p>
 
 <form method="post" action="{{ settings.base_path }}/admin/tournaments" class="panel">
   <input type="hidden" name="_csrf_token" value="{{ request.state.csrf_token }}">

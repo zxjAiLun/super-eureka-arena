@@ -33,10 +33,10 @@
     <a class="action-link" href="{{ settings.base_path }}/matches/{{ tournament.id }}">Replay games</a>
     {% if experiment and experiment.decision_rule == 'sprt' %}
       <span class="muted">
-        Formal SPRT rerun setup is available in the upcoming experiment
-        wizard — this form cannot recreate the frozen decision contract.
+        This form cannot recreate the frozen decision contract — set up a
+        formal experiment instead.
       </span>
-      <a class="action-link" href="{{ settings.base_path }}/admin/tournaments/new">New match</a>
+      <a class="action-link" href="{{ settings.base_path }}/admin/experiments/formal/new">Set up formal experiment</a>
     {% else %}
       <a class="action-link" href="{{ run_again }}">Run again</a>
     {% endif %}

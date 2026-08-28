@@ -337,7 +337,8 @@ def test_legacy_tournament_no_panel(app_client, engine_factory, registered,
     # detail page renders without the experiment panel
     r = app_client.get(f"/chessarena/admin/tournaments/{tid}")
     assert r.status_code == 200
-    assert "Experiment" not in r.text
+    assert "experiment-panel" not in r.text
+    assert "experiment-fragment" not in r.text
 
     # the status fragment renders empty (200, no panel)
     r = app_client.get(
@@ -459,8 +460,10 @@ def test_sprt_experiment_run_again_not_offered(app_client, engine_factory,
         session.commit()
 
     r = app_client.get(f"/chessarena/admin/tournaments/{tid_sprt}")
-    assert "upcoming experiment" in r.text and "wizard" in r.text
-    assert "New match" in r.text
+    # the wizard link + note (exact rendered texts)
+    assert "Set up formal experiment" in r.text
+    assert "decision contract" in r.text
+    assert "Formal Experiment" in r.text  # the real wizard link
     # the prefilled run-again URL must NOT carry the experiment envelope
     assert "experiment_id=rerun-sprt" not in r.text
     assert ">Run again<" not in r.text

@@ -1,0 +1,121 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · Formal Experiment{% endblock %}
+{% block content %}
+<h1>Formal Experiment</h1>
+<p class="muted">
+  A formal confirmation / promotion SPRT with Arena-verified contracts:
+  the baseline is always the current production behind
+  <code>current-final</code>, openings are disjoint from prior runs of the
+  experiment, and the statistical model is fixed (pentanomial SPRT,
+  logistic Elo). Creates a <strong>DRAFT</strong> — nothing starts until
+  you start it.
+</p>
+
+<section class="panel">
+  <h3>Baseline — current production (not selectable)</h3>
+  {% if baseline %}
+  <p>
+    <strong>{{ baseline.display_name }}</strong><br>
+    <code>{{ baseline.version_id }}</code>
+    <span class="status status-production">production</span><br>
+    <span class="muted">
+      source <code>{{ baseline.source_sha[:16] }}…</code> ·
+      binary <code>{{ baseline.binary_sha256[:16] }}…</code> ·
+      launch <code>[] {}</code>
+    </span>
+  </p>
+  {% else %}
+  <p class="demo-error">channel current-final has no production target.</p>
+  {% endif %}
+</section>
+
+<form method="post"
+      action="{{ settings.base_path }}/admin/experiments/formal/preview">
+  <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+
+  <section class="panel">
+    <h3>Experiment</h3>
+    <label>Experiment ID <span class="muted">— slug, stable across runs</span>
+      <input type="text" name="experiment_id" required
+             placeholder="s10-nnue-01 (lowercase slug)">
+    </label>
+    <label>Stage
+      <select name="experiment_stage" required>
+        <option value="confirmation">confirmation — high-confidence SPRT
+          after screening</option>
+        <option value="promotion">promotion — final gate before production
+          (requires a prior confirmation ACCEPT_H1 and a promotable
+          EngineVersion candidate)</option>
+      </select>
+    </label>
+    <label>Purpose
+      <textarea name="experiment_purpose" rows="3" required maxlength="2000"
+                placeholder="What question does this run answer?"></textarea>
+    </label>
+  </section>
+
+  <section class="panel">
+    <h3>Candidate</h3>
+    <label>Side
+      <select name="candidate" required>
+        <optgroup label="EnginePresets (experimental profiles)">
+          {% for p in presets %}
+            <option value="preset:{{ p.preset_id }}">
+              {{ p.display_name }} ({{ p.build_id }})
+            </option>
+          {% endfor %}
+        </optgroup>
+        <optgroup label="EngineVersions (candidate / experimental)">
+          {% for v in candidate_versions %}
+            <option value="version:{{ v.version_id }}">
+              {{ v.display_name }} — {{ v.version_id }}
+            </option>
+          {% endfor %}
+        </optgroup>
+      </select>
+    </label>
+    <p class="muted">
+      promotion stage requires an EngineVersion candidate that passes the
+      production gates (default launch identity, enabled build, provenance).
+    </p>
+  </section>
+
+  <section class="panel">
+    <h3>SPRT hypothesis</h3>
+    <label>elo0 (H0) <input type="number" step="0.5" name="elo0" value="0" required></label>
+    <label>elo1 (H1) <input type="number" step="0.5" name="elo1" value="10" required></label>
+    <label>alpha <input type="number" step="any" min="0.001" max="0.499" name="alpha" value="0.05" required></label>
+    <label>beta <input type="number" step="any" min="0.001" max="0.499" name="beta" value="0.05" required></label>
+    <label>max pairs <input type="number" min="1" name="max_pairs" value="1000" required></label>
+    <p class="muted">
+      Model fixed: pentanomial SPRT on pairs, logistic Elo; Wald bounds
+      computed from alpha/beta; pairs == max_pairs; Arena Elo stays OFF.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h3>Openings</h3>
+    <label>Opening set
+      <select name="opening_set_id" required>
+        {% for o in openings %}
+          <option value="{{ o.opening_set_id }}">
+            {{ o.opening_set_id }} ({{ o.position_count }} positions)
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Opening plies <span class="muted">(PGN books only)</span>
+      <input type="number" min="1" name="opening_plies" placeholder="16">
+    </label>
+    <label>Opening seed <span class="muted">(blank = generated once at preview)</span>
+      <input type="number" min="0" name="opening_seed" placeholder="auto">
+    </label>
+    <label>Additional prior tournament IDs <span class="muted">— comma-separated; openings of these runs are excluded (legacy runs without an envelope). Prior runs of the same experiment are excluded automatically.</span>
+      <input type="text" name="explicit_prior_tournament_ids"
+             placeholder="uuid,uuid">
+    </label>
+  </section>
+
+  <button type="submit">Preview formal experiment</button>
+</form>
+{% endblock %}
