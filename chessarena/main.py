@@ -74,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(tournaments.router, prefix=api_prefix)
     app.include_router(tournaments.admin_router, prefix=bp)
     app.include_router(versions.admin_router, prefix=bp)
+    app.include_router(builds.admin_router, prefix=bp)
 
     # Public, anonymous replay: read-only JSON under /public-api/v1 and the
     # public HTML pages (home, matches, match detail, game replay).  Nginx

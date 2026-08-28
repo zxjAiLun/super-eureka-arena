@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · Create Version{% endblock %}
+{% block content %}
+<p><a href="{{ settings.base_path }}/admin/builds/">&larr; All builds</a></p>
+<h1>Create EngineVersion</h1>
+<p class="muted">
+  Register the default-identity EngineVersion for
+  <code>{{ build.build_id }}</code>. This is the web equivalent of
+  <code>engine-version create --build …</code>: the launch identity is
+  always the artifact default and the lifecycle always starts hidden and
+  unrated — promotion is the only path to production.
+</p>
+
+<section class="panel">
+  <h3>Source build</h3>
+  <dl class="result-grid">
+    <dt>Build</dt><dd><code>{{ build.build_id }}</code></dd>
+    <dt>Engine</dt><dd>{{ build.engine_name }}</dd>
+    <dt>Source SHA</dt><dd><code>{{ build.git_sha }}</code></dd>
+    <dt>Binary SHA</dt><dd><code>{{ build.binary_sha256 }}</code></dd>
+    <dt>Launch identity</dt><dd><code>command_args=[] uci_options={}</code> (fixed)</dd>
+  </dl>
+</section>
+
+{% if blocked_reason %}
+<section class="panel">
+  <h3>Blocked</h3>
+  <p class="demo-error">Cannot create a version from this build: {{ blocked_reason }}.</p>
+</section>
+{% else %}
+<section class="panel">
+  <h3>New version</h3>
+  <form method="post"
+        action="{{ settings.base_path }}/admin/builds/{{ build.build_id }}/version">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <label class="hp-field">
+      <span class="hp-field-label">version_id</span>
+      <input type="text" name="version_id" required
+             placeholder="ce-currentfinal-20260828">
+    </label>
+    <label class="hp-field">
+      <span class="hp-field-label">display_name</span>
+      <input type="text" name="display_name" required
+             placeholder="CurrentFinal · … · 2026-08-28">
+    </label>
+    <label class="hp-field">
+      <span class="hp-field-label">status</span>
+      <select name="status">
+        <option value="candidate">candidate</option>
+        <option value="experimental">experimental</option>
+      </select>
+    </label>
+    <p class="muted">
+      The new version starts <strong>candidate / hidden / unrated</strong>
+      with the artifact default launch identity. Neither is configurable
+      here.
+    </p>
+    <button type="submit" class="hp-start">Create version</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}
