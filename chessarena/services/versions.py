@@ -321,6 +321,37 @@ def _validate_target_build(session, target: EngineVersion) -> list[str]:
     return errors
 
 
+def _validate_production_launch_identity(target: EngineVersion) -> list[str]:
+    """Production gate: only the artifact's DEFAULT launch identity may
+    ever reach production (the frozen V2.1 anti-garbage contract).
+
+    The identity fingerprint includes command_args/uci_options, so a
+    production version launched via an explicit profile alias (or any
+    non-default UCI config) would be an artificial SECOND identity for the
+    same chess player.  Profile/config identities may exist as
+    candidates/experimental and play in tournaments; if one wins, the
+    Engine repo promotes it, a NEW default-production artifact is built,
+    and THAT version (command_args=[], uci_options={}) is the one promoted.
+
+    This gate runs regardless of HOW the version was created (HTTP, CLI,
+    internal script, preset snapshot) — promotion is the single last door
+    to the production status."""
+    errors: list[str] = []
+    if list(target.command_args or []):
+        errors.append(
+            f"target {target.version_id} production launch must use the "
+            f"artifact default command_args=[] "
+            f"(got {list(target.command_args)})"
+        )
+    if dict(target.uci_options or {}):
+        errors.append(
+            f"target {target.version_id} production launch must use the "
+            f"artifact default uci_options={{}} "
+            f"(got {dict(target.uci_options)})"
+        )
+    return errors
+
+
 def plan_channel_promotion(
     session, channel_id: str, target_version_id: str
 ) -> PromotionPlan:
@@ -371,8 +402,12 @@ def plan_channel_promotion(
                 f"another channel"
             )
         # Production gate: the target's build must still be registered,
-        # enabled, and provenance-consistent (P1-2).
+        # enabled, and provenance-consistent (P1-2), AND it must carry the
+        # artifact's default launch identity — no profile aliases or
+        # non-default UCI configs may ever reach production (V2.1-A
+        # Repair 2).
         errors.extend(_validate_target_build(session, target))
+        errors.extend(_validate_production_launch_identity(target))
 
     plan = PromotionPlan(
         channel_id=channel_id,

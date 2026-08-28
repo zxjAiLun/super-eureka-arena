@@ -337,11 +337,10 @@ def test_api_channel_put_rejected_promote_is_controlled(
             status="production", rating_enabled=True, public_visible=True,
         )
         versions.set_channel(session, "current-final", "ce-ch-old")
-        # target candidate (distinct fingerprint via the preset)
-        versions.create_version_from_preset(
-            session, version_id="ce-ch-cand", display_name="Ch Cand",
-            preset_id="chessengine-production",
-        )
+        # target candidate: default launch identity on a second build
+        _default_identity_target(engine_factory, registered,
+                                 version_id="ce-ch-cand",
+                                 display_name="Ch Cand")
 
     # generic repoint: gone, 405, and it mutated nothing
     r = app_client.put("/chessarena/api/v1/engine-channels/current-final",
@@ -441,6 +440,52 @@ def _setup_promotion_scene(engine_factory, registered):
     return manifest, "ce-old-prod"
 
 
+def _default_identity_target(session_factory, registered,
+                              version_id="ce-cand",
+                              display_name="Cand"):
+    """Create a PROMOTABLE candidate: default launch identity
+    (command_args=[], uci_options={}) on a SECOND registered build so its
+    fingerprint differs from the scene's old production.  Returns the
+    version_id; commits happen inside."""
+    import hashlib
+    import json as _json
+    from pathlib import Path
+    from chessarena.models import EngineBuild
+
+    build_dir = Path(registered["build_dir"]).parent / "build2"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    content = b"second dummy engine binary for promotion tests"
+    (build_dir / "engine").write_bytes(content)
+    m2 = {
+        "schema_version": 1,
+        "build_id": "build2-x86_64",
+        "git_sha": "b" * 40,
+        "binary_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    (build_dir / "manifest.json").write_text(_json.dumps(m2))
+    with session_factory() as session:
+        existing = (
+            session.query(EngineBuild)
+            .filter(EngineBuild.build_id == "build2-x86_64")
+            .first()
+        )
+        if existing is None:
+            session.add(EngineBuild(
+                build_id="build2-x86_64", engine_name="Test",
+                git_sha=m2["git_sha"],
+                binary_path=str(build_dir / "engine"),
+                binary_sha256=m2["binary_sha256"], platform="x86_64",
+                supported_profiles=[], manifest=m2, enabled=True,
+            ))
+            session.commit()
+        target = versions.create_version_from_build(
+            session, version_id=version_id, display_name=display_name,
+            build_id="build2-x86_64", command_args=[], uci_options={},
+            status="candidate",
+        )
+        return target.version_id
+
+
 def test_v21_create_from_build_defaults_candidate_hidden_unrated(
     engine_factory, registered
 ):
@@ -497,13 +542,10 @@ def test_v21_duplicate_fingerprint_rejected_on_cli_defaults(
 def test_v21_promotion_dry_run_zero_mutation(engine_factory, registered):
     """(4) plan_channel_promotion performs ZERO DB mutation."""
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
-    # Distinct target fingerprint: derive from the preset (different args).
+    # PROMOTABLE target: default launch identity on a second build.
+    target_id = _default_identity_target(engine_factory, registered)
     with engine_factory() as session:
-        target = versions.create_version_from_preset(
-            session, version_id="ce-cand", display_name="Cand",
-            preset_id="chessengine-production", status="candidate",
-        )
-        target_id = target.version_id
+        target = versions.get_version(session, target_id)
         before = {
             "old": _immutable_fields(
                 versions.get_version(session, old_id)),
@@ -537,11 +579,10 @@ def test_v21_promotion_commit_full_transition(engine_factory, registered):
     """(5) promote_channel: old production -> historical, target candidate ->
     production + public + rated, channel -> target."""
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    # PROMOTABLE target: default launch identity on a second build
+    target_id = _default_identity_target(engine_factory, registered)
     with engine_factory() as session:
-        target = versions.create_version_from_preset(
-            session, version_id="ce-cand", display_name="Cand",
-            preset_id="chessengine-production", status="candidate",
-        )
+        target = versions.get_version(session, target_id)
         target_id = target.version_id
         versions.promote_channel(session, "current-final", target_id)
 
@@ -561,11 +602,10 @@ def test_v21_promotion_commit_full_transition(engine_factory, registered):
 def test_v21_promotion_preserves_immutable_fields(engine_factory, registered):
     """(6) immutable fields byte-for-byte identical before/after promotion."""
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    # PROMOTABLE target: default launch identity on a second build
+    target_id = _default_identity_target(engine_factory, registered)
     with engine_factory() as session:
-        target = versions.create_version_from_preset(
-            session, version_id="ce-cand", display_name="Cand",
-            preset_id="chessengine-production", status="candidate",
-        )
+        target = versions.get_version(session, target_id)
         target_id = target.version_id
         old_before = _immutable_fields(versions.get_version(session, old_id))
         tgt_before = _immutable_fields(target)
@@ -693,13 +733,9 @@ def test_v21_promotion_does_not_touch_frozen_snapshots(
         frozen_tournament_snapshot = json.dumps(
             t.config_snapshot, sort_keys=True)
 
+    target_id = _default_identity_target(engine_factory, registered)
     with engine_factory() as session:
-        target = versions.create_version_from_preset(
-            session, version_id="ce-cand", display_name="Cand",
-            preset_id="chessengine-production", status="candidate",
-        )
-        versions.promote_channel(session, "current-final",
-                                 target.version_id)
+        versions.promote_channel(session, "current-final", target_id)
 
     with engine_factory() as session:
         t = session.query(Tournament).filter(Tournament.id == tid).one()
@@ -709,8 +745,7 @@ def test_v21_promotion_does_not_touch_frozen_snapshots(
         assert hg.opponent_snapshot["version_id"] == old_id
         # the NEXT game through the channel resolves to the new production
         assert versions.get_channel(
-            session, "current-final").engine_version_id == \
-            target.version_id
+            session, "current-final").engine_version_id == target_id
 
 
 # ---------------------------------------------------------------------------
@@ -732,8 +767,34 @@ def test_v21_admin_cli_engine_version_create_and_promote(
     })
 
     manifest = _manifest(registered)
+    # a SECOND registered build so a default-identity (args=[], opts={})
+    # version on it has a distinct fingerprint from the old production.
+    import hashlib
+    import json as _json
+    from pathlib import Path
+    from chessarena.models import EngineBuild
+
+    build_dir = Path(registered["build_dir"]).parent / "build2"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    content = b"second dummy engine binary for cli lifecycle test"
+    (build_dir / "engine").write_bytes(content)
+    m2 = {
+        "schema_version": 1,
+        "build_id": "build2-x86_64",
+        "git_sha": "b" * 40,
+        "binary_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    (build_dir / "manifest.json").write_text(_json.dumps(m2))
+
     # old production on the channel
     with engine_factory() as session:
+        session.add(EngineBuild(
+            build_id="build2-x86_64", engine_name="Test", git_sha=m2["git_sha"],
+            binary_path=str(build_dir / "engine"),
+            binary_sha256=m2["binary_sha256"], platform="x86_64",
+            supported_profiles=[], manifest=m2, enabled=True,
+        ))
+        session.commit()
         versions.create_version_from_build(
             session, version_id="ce-old-prod", display_name="Old Prod",
             build_id=manifest["build_id"], command_args=[],
@@ -742,6 +803,8 @@ def test_v21_admin_cli_engine_version_create_and_promote(
         versions.set_channel(session, "current-final", "ce-old-prod")
 
     # create --from-preset: candidate / hidden / unrated, frozen args
+    # (preset snapshots stay experiment-grade identities — they can never
+    # pass the production launch-identity gate below)
     rc = admin.main([
         "engine-version", "create",
         "--from-preset", "chessengine-production",
@@ -766,33 +829,53 @@ def test_v21_admin_cli_engine_version_create_and_promote(
     ], settings=cli_settings)
     assert rc == 2
 
-    # dry-run: zero mutation
+    # a preset-derived (profile) candidate can NEVER be promoted
     rc = admin.main([
         "engine-channel", "promote", "current-final", "ce-cli-cand",
+    ], settings=cli_settings)
+    assert rc == 2  # production launch-identity gate: profile args
+
+    # create the DEFAULT-identity promotion target from the second build
+    rc = admin.main([
+        "engine-version", "create",
+        "--build", "build2-x86_64",
+        "--version", "ce-cli-default",
+        "--name", "CLI Default Identity",
+    ], settings=cli_settings)
+    assert rc == 0
+    with engine_factory() as session:
+        v = versions.get_version(session, "ce-cli-default")
+        assert list(v.command_args) == []
+        assert dict(v.uci_options) == {}
+
+    # dry-run: zero mutation
+    rc = admin.main([
+        "engine-channel", "promote", "current-final", "ce-cli-default",
     ], settings=cli_settings)
     assert rc == 0
     with engine_factory() as session:
         assert versions.get_channel(
             session, "current-final").engine_version_id == "ce-old-prod"
         assert versions.get_version(
-            session, "ce-cli-cand").status == "candidate"
+            session, "ce-cli-default").status == "candidate"
 
     # --yes: atomic promotion
     rc = admin.main([
-        "engine-channel", "promote", "current-final", "ce-cli-cand", "--yes",
+        "engine-channel", "promote", "current-final", "ce-cli-default",
+        "--yes",
     ], settings=cli_settings)
     assert rc == 0
     with engine_factory() as session:
         assert versions.get_channel(
-            session, "current-final").engine_version_id == "ce-cli-cand"
+            session, "current-final").engine_version_id == "ce-cli-default"
         assert versions.get_version(
             session, "ce-old-prod").status == "historical"
         assert versions.get_version(
-            session, "ce-cli-cand").status == "production"
+            session, "ce-cli-default").status == "production"
         assert versions.get_version(
-            session, "ce-cli-cand").public_visible is True
+            session, "ce-cli-default").public_visible is True
         assert versions.get_version(
-            session, "ce-cli-cand").rating_enabled is True
+            session, "ce-cli-default").rating_enabled is True
 
     # promote to an unknown version: fail closed, exit code 2, no mutation
     rc = admin.main([
@@ -801,7 +884,7 @@ def test_v21_admin_cli_engine_version_create_and_promote(
     assert rc == 2
     with engine_factory() as session:
         assert versions.get_channel(
-            session, "current-final").engine_version_id == "ce-cli-cand"
+            session, "current-final").engine_version_id == "ce-cli-default"
 
     # --build create with a fresh build id fails closed when unknown
     rc = admin.main([
@@ -822,11 +905,10 @@ def test_v21r_disabled_target_build_blocks_promotion(
     """P1-2: a build disabled after the candidate was created blocks BOTH
     the dry-run (plan.ok false) and the real promotion; nothing changes."""
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    # PROMOTABLE target: default launch identity on a second build
+    target_id = _default_identity_target(engine_factory, registered)
     with engine_factory() as session:
-        target = versions.create_version_from_preset(
-            session, version_id="ce-cand", display_name="Cand",
-            preset_id="chessengine-production", status="candidate",
-        )
+        target = versions.get_version(session, target_id)
         # disable the target's build AFTER creation
         build = session.query(EngineBuild).filter(
             EngineBuild.build_id == target.build_id).one()
@@ -861,11 +943,10 @@ def test_v21r_provenance_mismatch_blocks_promotion(
     provenance against the CURRENT registry; a drifted build row blocks
     promotion."""
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    # PROMOTABLE target: default launch identity on a second build
+    target_id = _default_identity_target(engine_factory, registered)
     with engine_factory() as session:
-        target = versions.create_version_from_preset(
-            session, version_id="ce-cand", display_name="Cand",
-            preset_id="chessengine-production", status="candidate",
-        )
+        target = versions.get_version(session, target_id)
         # simulate registry drift: the build's recorded binary changes
         build = session.query(EngineBuild).filter(
             EngineBuild.build_id == target.build_id).one()
@@ -913,7 +994,10 @@ def test_v21r_impact_counts_are_target_specific(
     """P2-2: rated-history and active-tournament counts only count
     tournaments whose frozen sides resolve to the target (via the shared
     participant resolver), not the whole database."""
-    from chessarena.models import COMPLETED
+    import hashlib
+    import json as _json
+    from pathlib import Path
+    from chessarena.models import COMPLETED, EngineBuild
 
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
     # one rated COMPLETED tournament frozen against the OLD production
@@ -927,6 +1011,18 @@ def test_v21r_impact_counts_are_target_specific(
         "source_sha": manifest["git_sha"],
     }
     tid = tournament_factory(name="old-rated", pairs=1, status=COMPLETED)
+    # a default-identity target on a SECOND registered build (promotable)
+    build_dir = Path(registered["build_dir"]).parent / "build2"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    content = b"second dummy engine binary for impact counts test"
+    (build_dir / "engine").write_bytes(content)
+    m2 = {
+        "schema_version": 1,
+        "build_id": "build2-x86_64",
+        "git_sha": "b" * 40,
+        "binary_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    (build_dir / "manifest.json").write_text(_json.dumps(m2))
     with engine_factory() as session:
         t = session.query(Tournament).filter(Tournament.id == tid).one()
         snap = dict(t.config_snapshot or {})
@@ -935,27 +1031,36 @@ def test_v21r_impact_counts_are_target_specific(
         t.arena_elo_enabled = True
         t.completed_pairs = 1
         t.finished_at = utcnow()
-        # one UNRELATED rated completed tournament (stockfish anchors)
+        session.add(EngineBuild(
+            build_id="build2-x86_64", engine_name="Test", git_sha=m2["git_sha"],
+            binary_path=str(build_dir / "engine"),
+            binary_sha256=m2["binary_sha256"], platform="x86_64",
+            supported_profiles=[], manifest=m2, enabled=True,
+        ))
         session.commit()
-        target = versions.create_version_from_preset(
+        target = versions.create_version_from_build(
             session, version_id="ce-cand", display_name="Cand",
-            preset_id="chessengine-production", status="candidate",
+            build_id="build2-x86_64", command_args=[], uci_options={},
+            status="candidate",
         )
         target_id = target.version_id
 
     # a legacy fingerprint-matching rated tournament for the TARGET:
-    # same frozen config as the candidate (preset side), no version_id —
+    # same frozen config as the target (default identity, no version_id) —
     # the resolver must map it to the target via fingerprint.
     fp_side = {
-        "preset_id": "chessengine-production",
-        "display_name": "ChessEngine Production",
-        "build_id": manifest["build_id"],
-        "command_args": ["--profile", "current-final"],
+        "preset_id": "cand-preset",
+        "display_name": "Cand Preset",
+        "build_id": "build2-x86_64",
+        "command_args": [],
         "uci_options": {},
-        "binary_sha256": manifest["binary_sha256"],
-        "source_sha": manifest["git_sha"],
+        "binary_sha256": m2["binary_sha256"],
+        "source_sha": m2["git_sha"],
     }
     tid2 = tournament_factory(name="target-legacy-fp", pairs=1,
+                              status=COMPLETED)
+    # plus an unrelated rated COMPLETED tournament (stockfish anchors)
+    tid3 = tournament_factory(name="unrelated-rated", pairs=1,
                               status=COMPLETED)
     with engine_factory() as session:
         t2 = session.query(Tournament).filter(Tournament.id == tid2).one()
@@ -965,15 +1070,132 @@ def test_v21r_impact_counts_are_target_specific(
         t2.arena_elo_enabled = True
         t2.completed_pairs = 1
         t2.finished_at = utcnow()
+        t3 = session.query(Tournament).filter(Tournament.id == tid3).one()
+        t3.arena_elo_enabled = True
+        t3.completed_pairs = 1
+        t3.finished_at = utcnow()
         session.commit()
 
         plan = versions.plan_channel_promotion(
             session, "current-final", target_id)
         assert plan.ok, plan["errors"]
-        # ONLY the fingerprint-matching tournament counts for the target.
+        # ONLY the fingerprint-matching tournament counts for the target:
+        # not the old production's history, not the unrelated tournament.
         assert plan["rated_history_matches_for_target"] == 1
-        # The old production's rated history is not the target's.
-        assert plan["rated_history_matches_for_target"] != 2
         # No active tournaments reference either side in this scene.
         assert plan["active_tournaments_referencing_target"] == 0
         assert plan["active_tournaments_referencing_current"] == 0
+
+
+# ---------------------------------------------------------------------------
+# V2.1-A Repair 2: production launch-identity gate
+# ---------------------------------------------------------------------------
+def test_v21r2_profile_args_block_promotion(engine_factory, registered):
+    """Repair 2: a candidate created with an explicit profile alias
+    (however it was created — here via the service, the same shape HTTP
+    can mint) can NEVER reach production: plan.ok false, promote raises,
+    zero mutation on channel/old/target."""
+    manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    with engine_factory() as session:
+        # same build as the old production, but with a profile alias —
+        # a distinct fingerprint, so creation succeeds as candidate.
+        target = versions.create_version_from_build(
+            session, version_id="ce-fake-cf", display_name="Fake CurrentFinal",
+            build_id=manifest["build_id"],
+            command_args=["--profile", "current-final"],
+            uci_options={}, status="candidate",
+        )
+        plan = versions.plan_channel_promotion(
+            session, "current-final", target.version_id)
+        assert not plan.ok
+        assert any("command_args=[]" in e for e in plan["errors"])
+
+        with pytest.raises(VersionError):
+            versions.promote_channel(
+                session, "current-final", target.version_id)
+
+        # zero mutation
+        assert versions.get_version(
+            session, old_id).status == "production"
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == old_id
+        tgt = versions.get_version(session, "ce-fake-cf")
+        assert tgt.status == "candidate"
+        assert tgt.public_visible is False
+        assert tgt.rating_enabled is False
+
+
+def test_v21r2_nonempty_uci_options_block_promotion(
+    engine_factory, registered
+):
+    """Repair 2: a candidate with non-default UCI options (e.g. Hash=999)
+    also fails the production launch-identity gate."""
+    manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    with engine_factory() as session:
+        target = versions.create_version_from_build(
+            session, version_id="ce-hash999", display_name="Hash 999",
+            build_id=manifest["build_id"],
+            command_args=[], uci_options={"Hash": 999},
+            status="candidate",
+        )
+        plan = versions.plan_channel_promotion(
+            session, "current-final", target.version_id)
+        assert not plan.ok
+        assert any("uci_options={}" in e for e in plan["errors"])
+        with pytest.raises(VersionError):
+            versions.promote_channel(
+                session, "current-final", target.version_id)
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == old_id
+
+
+def test_v21r2_default_identity_target_still_promotes(
+    engine_factory, registered
+):
+    """Repair 2 does not over-block: the canonical onboarding shape —
+    create from raw build with command_args=[] and uci_options={} —
+    still plans and promotes cleanly (plan.ok true, full transition)."""
+    manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    # The scene's old production already uses the same build + [] + {},
+    # so a NEW default-identity version on the same build would collide on
+    # fingerprint. Build a second registered build to get a distinct
+    # default-identity target.
+    import hashlib
+    import json as _json
+    from pathlib import Path
+    from chessarena.models import EngineBuild
+
+    build_dir = Path(registered["build_dir"]).parent / "build2"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    content = b"second dummy engine binary for identity-gate test"
+    (build_dir / "engine").write_bytes(content)
+    m2 = {
+        "schema_version": 1,
+        "build_id": "build2-x86_64",
+        "git_sha": "b" * 40,
+        "binary_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    (build_dir / "manifest.json").write_text(_json.dumps(m2))
+    with engine_factory() as session:
+        session.add(EngineBuild(
+            build_id="build2-x86_64", engine_name="Test", git_sha=m2["git_sha"],
+            binary_path=str(build_dir / "engine"),
+            binary_sha256=m2["binary_sha256"], platform="x86_64",
+            supported_profiles=[], manifest=m2, enabled=True,
+        ))
+        session.commit()
+        target = versions.create_version_from_build(
+            session, version_id="ce-clean-default",
+            display_name="Clean Default",
+            build_id="build2-x86_64",
+            command_args=[], uci_options={}, status="candidate",
+        )
+        plan = versions.plan_channel_promotion(
+            session, "current-final", target.version_id)
+        assert plan.ok, plan["errors"]
+        versions.promote_channel(session, "current-final", target.version_id)
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == \
+            "ce-clean-default"
+        assert versions.get_version(
+            session, "ce-clean-default").status == "production"

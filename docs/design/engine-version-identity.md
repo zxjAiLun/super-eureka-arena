@@ -1,8 +1,12 @@
 # Design: EngineVersion identity model (frozen 2026-08-10)
 
-Status: **DESIGN DECISION — frozen, not yet implemented**. Schema/migration work
-is deferred until after the S4.3D formal SPRT conclusion and the S4.3E
-promotion (do NOT implement during an active formal test).
+Status: **IMPLEMENTED — V2.1 lifecycle active** (schema landed in
+Phase 1; the V2.1 controlled lifecycle, atomic promotion and production
+launch-identity gate below are live). Earlier sections are kept as the
+frozen design record; where they say "not yet implemented", read them as
+the 2026-08-10 snapshot. Lifecycle metadata (`status`, `public_visible`,
+`rating_enabled`) is mutable BY DESIGN through the controlled promotion
+flow — only the identity fields listed in the V2.1 section are immutable.
 
 ## Problem
 
