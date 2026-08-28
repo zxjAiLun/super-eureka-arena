@@ -172,7 +172,6 @@ def _render_promotion_plan(plan) -> None:
         print(f"  ({k}: {info[k]} — informational, frozen snapshots "
               f"unaffected)")
 
-
 def _cmd_engine_channel_promote(args, session_factory) -> int:
     from .services import versions
     from .services.versions import VersionError
@@ -222,8 +221,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p_create = vsub.add_parser(
         "create", help="register a new immutable EngineVersion"
     )
-    p_create.add_argument("--build", help="registered EngineBuild id")
-    p_create.add_argument(
+    source = p_create.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--build", help="registered EngineBuild id (exactly one of "
+                        "--build / --from-preset)"
+    )
+    source.add_argument(
         "--from-preset",
         help="snapshot an existing EnginePreset instead of a raw build",
     )
@@ -269,9 +272,8 @@ def main(argv: list[str] | None = None, settings=None) -> int:
         return _archive_tournament(args.tournament_id, session_factory)
     if args.command == "engine-version":
         if args.engine_version_command == "create":
-            if not args.from_preset and not args.build:
-                parser.error("engine-version create requires --build "
-                             "or --from-preset")
+            # exactly-one --build / --from-preset enforced by the mutually
+            # exclusive argparse group
             return _cmd_engine_version_create(args, session_factory)
         parser.error("engine-version requires a subcommand (create)")
     if args.command == "engine-channel":

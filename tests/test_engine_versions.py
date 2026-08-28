@@ -248,28 +248,61 @@ def test_channel_set_and_target_validation(engine_factory, registered):
 
 
 # ---------------------------------------------------------------------------
-# API
+# API (V2.1 controlled lifecycle)
 # ---------------------------------------------------------------------------
 def test_api_create_list_get_version(engine_factory, registered, app_client):
     manifest = _manifest(registered)
     r = app_client.post("/chessarena/api/v1/engine-versions", json={
-        "version_id": "ce-api-prod",
-        "display_name": "API Prod",
+        "version_id": "ce-api-cand",
+        "display_name": "API Cand",
         "build_id": manifest["build_id"],
         "command_args": [],
-        "status": "production",
     })
     assert r.status_code == 200, r.text[:300]
     body = r.json()
-    assert body["version_id"] == "ce-api-prod"
+    assert body["version_id"] == "ce-api-cand"
     assert body["identity_fingerprint"]
-    got = app_client.get("/chessarena/api/v1/engine-versions/ce-api-prod")
+    # Controlled lifecycle: HTTP-created versions are candidate/hidden/unrated.
+    assert body["status"] == "candidate"
+    assert body["public_visible"] is False
+    assert body["rating_enabled"] is False
+    got = app_client.get("/chessarena/api/v1/engine-versions/ce-api-cand")
     assert got.status_code == 200
     assert got.json()["binary_sha256"] == manifest["binary_sha256"]
     listing = app_client.get("/chessarena/api/v1/engine-versions").json()
-    assert any(v["version_id"] == "ce-api-prod" for v in listing)
+    assert any(v["version_id"] == "ce-api-cand" for v in listing)
     missing = app_client.get("/chessarena/api/v1/engine-versions/nope")
     assert missing.status_code == 404
+
+
+def test_api_cannot_create_production_directly(engine_factory, registered,
+                                               app_client):
+    """P1-1a: the HTTP surface cannot mint production/historical/public/
+    rated participants — the schema rejects the statuses and the endpoint
+    forces hidden/unrated regardless of any smuggled flags."""
+    manifest = _manifest(registered)
+    for bad_status in ("production", "historical"):
+        r = app_client.post("/chessarena/api/v1/engine-versions", json={
+            "version_id": f"ce-api-bad-{bad_status}",
+            "display_name": "Bad",
+            "build_id": manifest["build_id"],
+            "status": bad_status,
+        })
+        assert r.status_code == 422, (bad_status, r.text[:200])
+    # smuggled lifecycle flags are accepted by the model for compat but the
+    # endpoint forces the controlled defaults: candidate/hidden/unrated.
+    r = app_client.post("/chessarena/api/v1/engine-versions", json={
+        "version_id": "ce-api-smuggled",
+        "display_name": "Smuggled",
+        "build_id": manifest["build_id"],
+        "status": "candidate",
+        "public_visible": True,
+        "rating_enabled": True,
+    })
+    assert r.status_code == 200, r.text[:300]
+    assert r.json()["status"] == "candidate"
+    assert r.json()["public_visible"] is False
+    assert r.json()["rating_enabled"] is False
 
 
 def test_api_create_version_from_preset_and_duplicate(engine_factory,
@@ -278,30 +311,67 @@ def test_api_create_version_from_preset_and_duplicate(engine_factory,
         "version_id": "ce-api-hist",
         "display_name": "API Hist",
         "preset_id": "chessengine-production",
-        "status": "historical",
     })
     assert r.status_code == 200, r.text[:300]
+    assert r.json()["status"] == "candidate"  # controlled default
     dup = app_client.post("/chessarena/api/v1/engine-versions", json={
         "version_id": "ce-api-hist2",
         "display_name": "API Hist2",
         "preset_id": "chessengine-production",
-        "status": "historical",
     })
     assert dup.status_code == 422  # duplicate immutable fingerprint
 
 
-def test_api_channel_put(engine_factory, registered, app_client):
+def test_api_channel_put_rejected_promote_is_controlled(
+    engine_factory, registered, app_client
+):
+    """P1-1b: generic channel repoint is removed (405); the controlled
+    promote endpoint runs the full atomic lifecycle transition."""
     manifest = _manifest(registered)
-    app_client.post("/chessarena/api/v1/engine-versions", json={
-        "version_id": "ce-ch-prod", "display_name": "Ch Prod",
-        "build_id": manifest["build_id"], "status": "production"})
+    # old production on the channel (registered via the service with the
+    # known-past-production explicit flags)
+    with engine_factory() as session:
+        versions.create_version_from_build(
+            session, version_id="ce-ch-old", display_name="Ch Old",
+            build_id=manifest["build_id"], command_args=[],
+            status="production", rating_enabled=True, public_visible=True,
+        )
+        versions.set_channel(session, "current-final", "ce-ch-old")
+        # target candidate (distinct fingerprint via the preset)
+        versions.create_version_from_preset(
+            session, version_id="ce-ch-cand", display_name="Ch Cand",
+            preset_id="chessengine-production",
+        )
+
+    # generic repoint: gone, 405, and it mutated nothing
     r = app_client.put("/chessarena/api/v1/engine-channels/current-final",
-                       json={"engine_version_id": "ce-ch-prod"})
+                       json={"engine_version_id": "ce-ch-cand"})
+    assert r.status_code == 405, r.text[:200]
+    with engine_factory() as session:
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == "ce-ch-old"
+
+    # controlled promotion endpoint: full lifecycle transition
+    r = app_client.post(
+        "/chessarena/api/v1/engine-channels/current-final/promote",
+        json={"engine_version_id": "ce-ch-cand"})
     assert r.status_code == 200, r.text[:300]
-    assert r.json()["engine_version_id"] == "ce-ch-prod"
-    bad = app_client.put("/chessarena/api/v1/engine-channels/current-final",
-                         json={"engine_version_id": "nope"})
-    assert bad.status_code == 422
+    assert r.json()["engine_version_id"] == "ce-ch-cand"
+    with engine_factory() as session:
+        assert versions.get_version(
+            session, "ce-ch-old").status == "historical"
+        tgt = versions.get_version(session, "ce-ch-cand")
+        assert tgt.status == "production"
+        assert tgt.public_visible is True
+        assert tgt.rating_enabled is True
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == "ce-ch-cand"
+
+    # promoting an unknown target: 422 fail-closed
+    r = app_client.post(
+        "/chessarena/api/v1/engine-channels/current-final/promote",
+        json={"engine_version_id": "nope"})
+    assert r.status_code == 422
 
 
 # ---------------------------------------------------------------------------
@@ -313,11 +383,15 @@ def test_version_tournament_freezes_identity(engine_factory, registered,
     opening = json.loads(
         (registered["opening_dir"] / "manifest.json").read_text(encoding="utf-8")
     )
-    r = app_client.post("/chessarena/api/v1/engine-versions", json={
-        "version_id": "ce-tour-prod", "display_name": "Tour Prod",
-        "build_id": manifest["build_id"], "command_args": [],
-        "status": "production"})
-    assert r.status_code == 200, r.text[:300]
+    # Register a production participant for tournament selection via the
+    # service (known-past-production explicit flags; the HTTP surface can
+    # no longer mint production).
+    with engine_factory() as session:
+        versions.create_version_from_build(
+            session, version_id="ce-tour-prod", display_name="Tour Prod",
+            build_id=manifest["build_id"], command_args=[],
+            status="production", rating_enabled=True, public_visible=True,
+        )
     payload = {
         "name": "version-vs-version",
         "engine_a": {"version_id": "ce-tour-prod"},
@@ -737,3 +811,169 @@ def test_v21_admin_cli_engine_version_create_and_promote(
         "--name", "X",
     ], settings=cli_settings)
     assert rc == 2
+
+
+# ---------------------------------------------------------------------------
+# V2.1 Repair 1: production gate + controlled surface regressions
+# ---------------------------------------------------------------------------
+def test_v21r_disabled_target_build_blocks_promotion(
+    engine_factory, registered
+):
+    """P1-2: a build disabled after the candidate was created blocks BOTH
+    the dry-run (plan.ok false) and the real promotion; nothing changes."""
+    manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    with engine_factory() as session:
+        target = versions.create_version_from_preset(
+            session, version_id="ce-cand", display_name="Cand",
+            preset_id="chessengine-production", status="candidate",
+        )
+        # disable the target's build AFTER creation
+        build = session.query(EngineBuild).filter(
+            EngineBuild.build_id == target.build_id).one()
+        build.enabled = False
+        session.commit()
+
+        plan = versions.plan_channel_promotion(
+            session, "current-final", target.version_id)
+        assert not plan.ok
+        assert any("disabled" in e for e in plan["errors"])
+
+        with pytest.raises(VersionError):
+            versions.promote_channel(
+                session, "current-final", target.version_id)
+
+        # nothing changed: old still production, channel untouched,
+        # candidate untouched
+        assert versions.get_version(
+            session, old_id).status == "production"
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == old_id
+        tgt = versions.get_version(session, target.version_id)
+        assert tgt.status == "candidate"
+        assert tgt.public_visible is False
+        assert tgt.rating_enabled is False
+
+
+def test_v21r_provenance_mismatch_blocks_promotion(
+    engine_factory, registered
+):
+    """P1-2b: the promotion gate re-verifies the version's frozen
+    provenance against the CURRENT registry; a drifted build row blocks
+    promotion."""
+    manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    with engine_factory() as session:
+        target = versions.create_version_from_preset(
+            session, version_id="ce-cand", display_name="Cand",
+            preset_id="chessengine-production", status="candidate",
+        )
+        # simulate registry drift: the build's recorded binary changes
+        build = session.query(EngineBuild).filter(
+            EngineBuild.build_id == target.build_id).one()
+        build.binary_sha256 = "0" * 64
+        session.commit()
+
+        plan = versions.plan_channel_promotion(
+            session, "current-final", target.version_id)
+        assert not plan.ok
+        assert any("provenance mismatch" in e for e in plan["errors"])
+        with pytest.raises(VersionError):
+            versions.promote_channel(
+                session, "current-final", target.version_id)
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == old_id
+
+
+def test_v21r_cli_exactly_one_source(engine_factory, registered, settings,
+                                     capsys):
+    """P2-1: --build and --from-preset are mutually exclusive at the
+    parser level."""
+    from chessarena import admin
+
+    cli_settings = type(settings)(**{
+        **{f.name: getattr(settings, f.name)
+           for f in settings.__dataclass_fields__.values()},
+        "db_url": settings.db_url,
+    })
+    with pytest.raises(SystemExit) as excinfo:
+        admin.main([
+            "engine-version", "create",
+            "--build", "some-build",
+            "--from-preset", "chessengine-production",
+            "--version", "ce-both",
+            "--name", "Both",
+        ], settings=cli_settings)
+    assert excinfo.value.code == 2  # argparse usage error
+    out = capsys.readouterr()
+    assert "not allowed with argument" in (out.err + out.out)
+
+
+def test_v21r_impact_counts_are_target_specific(
+    engine_factory, registered, tournament_factory
+):
+    """P2-2: rated-history and active-tournament counts only count
+    tournaments whose frozen sides resolve to the target (via the shared
+    participant resolver), not the whole database."""
+    from chessarena.models import COMPLETED
+
+    manifest, old_id = _setup_promotion_scene(engine_factory, registered)
+    # one rated COMPLETED tournament frozen against the OLD production
+    old_side = {
+        "version_id": old_id,
+        "display_name": "Old Prod",
+        "build_id": manifest["build_id"],
+        "command_args": [],
+        "uci_options": {},
+        "binary_sha256": manifest["binary_sha256"],
+        "source_sha": manifest["git_sha"],
+    }
+    tid = tournament_factory(name="old-rated", pairs=1, status=COMPLETED)
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        snap = dict(t.config_snapshot or {})
+        snap["engine_a"] = dict(old_side)
+        t.config_snapshot = snap
+        t.arena_elo_enabled = True
+        t.completed_pairs = 1
+        t.finished_at = utcnow()
+        # one UNRELATED rated completed tournament (stockfish anchors)
+        session.commit()
+        target = versions.create_version_from_preset(
+            session, version_id="ce-cand", display_name="Cand",
+            preset_id="chessengine-production", status="candidate",
+        )
+        target_id = target.version_id
+
+    # a legacy fingerprint-matching rated tournament for the TARGET:
+    # same frozen config as the candidate (preset side), no version_id —
+    # the resolver must map it to the target via fingerprint.
+    fp_side = {
+        "preset_id": "chessengine-production",
+        "display_name": "ChessEngine Production",
+        "build_id": manifest["build_id"],
+        "command_args": ["--profile", "current-final"],
+        "uci_options": {},
+        "binary_sha256": manifest["binary_sha256"],
+        "source_sha": manifest["git_sha"],
+    }
+    tid2 = tournament_factory(name="target-legacy-fp", pairs=1,
+                              status=COMPLETED)
+    with engine_factory() as session:
+        t2 = session.query(Tournament).filter(Tournament.id == tid2).one()
+        snap = dict(t2.config_snapshot or {})
+        snap["engine_b"] = dict(fp_side)
+        t2.config_snapshot = snap
+        t2.arena_elo_enabled = True
+        t2.completed_pairs = 1
+        t2.finished_at = utcnow()
+        session.commit()
+
+        plan = versions.plan_channel_promotion(
+            session, "current-final", target_id)
+        assert plan.ok, plan["errors"]
+        # ONLY the fingerprint-matching tournament counts for the target.
+        assert plan["rated_history_matches_for_target"] == 1
+        # The old production's rated history is not the target's.
+        assert plan["rated_history_matches_for_target"] != 2
+        # No active tournaments reference either side in this scene.
+        assert plan["active_tournaments_referencing_target"] == 0
+        assert plan["active_tournaments_referencing_current"] == 0

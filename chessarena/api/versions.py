@@ -1,9 +1,18 @@
-"""EngineVersion / EngineChannel API (S4.3E Phase 1).
+"""EngineVersion / EngineChannel API (S4.3E Phase 1 + V2.1 lifecycle).
 
 EngineVersion is the permanent immutable rated-engine identity
 (version == Elo participant). Creation snapshots the launch configuration;
 there is NO generic update endpoint for build/launch identity fields.
-Channels are the mutable alias (e.g. current-final) pointing at a version.
+
+V2.1 controlled lifecycle on the HTTP surface:
+- ``POST /engine-versions`` mints ONLY candidate/experimental versions,
+  always hidden and unrated — production/historical/public/rated are
+  reachable solely through the promotion flow.
+- ``PUT /engine-channels/{id}`` (generic repoint) is REMOVED: it could
+  bypass the lifecycle contract and create half-promotion states. The
+  controlled surface is ``POST /engine-channels/{id}/promote``, which runs
+  the atomic ``promote_channel`` (old production -> historical, target ->
+  production/public/rated, channel repoint — one transaction).
 """
 
 from __future__ import annotations
@@ -35,7 +44,8 @@ from ..services.versions import (
     get_version,
     list_channels,
     list_versions,
-    set_channel,
+    plan_channel_promotion,
+    promote_channel,
 )
 
 router = APIRouter(tags=["engine-versions"])
@@ -78,9 +88,11 @@ def create_version_endpoint(
                 build_id=body.build_id,
                 command_args=body.command_args,
                 uci_options=body.uci_options,
+                # Controlled lifecycle: the HTTP surface can only mint
+                # candidate/experimental, always hidden and unrated.
                 status=body.status,
-                rating_enabled=body.rating_enabled,
-                public_visible=body.public_visible,
+                rating_enabled=False,
+                public_visible=False,
             )
         return create_version_from_preset(
             session,
@@ -88,8 +100,8 @@ def create_version_endpoint(
             display_name=body.display_name,
             preset_id=body.preset_id,
             status=body.status,
-            rating_enabled=body.rating_enabled,
-            public_visible=body.public_visible,
+            rating_enabled=False,
+            public_visible=False,
         )
     except VersionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -104,16 +116,56 @@ def list_channels_endpoint(session: Session = Depends(get_db)):
     "/engine-channels/{channel_id}",
     response_model=EngineChannelOut,
     dependencies=[Depends(require_same_origin)],
+    deprecated=True,
 )
 def set_channel_endpoint(
     channel_id: str,
     body: EngineChannelUpdate,
     session: Session = Depends(get_db),
 ):
+    """Generic channel repoint — REMOVED from the operator surface (V2.1).
+
+    It bypassed the controlled lifecycle: pointing a channel at a candidate
+    while the old version stayed "production" created exactly the
+    half-promotion state the lifecycle contract forbids. The replacement is
+    ``POST /engine-channels/{channel_id}/promote``. ``set_channel`` remains
+    an internal service for bootstrap/backfill only.
+    """
+    raise HTTPException(
+        status_code=405,
+        detail=(
+            "generic channel repoint is not permitted; use "
+            "POST /engine-channels/{channel_id}/promote for the controlled "
+            "promotion flow"
+        ),
+    )
+
+
+@router.post(
+    "/engine-channels/{channel_id}/promote",
+    response_model=EngineChannelOut,
+    dependencies=[Depends(require_same_origin)],
+)
+def promote_channel_endpoint(
+    channel_id: str,
+    body: EngineChannelUpdate,
+    session: Session = Depends(get_db),
+):
+    """Controlled promotion: run the atomic ``promote_channel`` flow.
+
+    ``engine_version_id`` is the TARGET. One transaction: old production ->
+    historical, target -> production + public + rated, channel -> target.
+    Existing tournaments/HumanGames run on frozen snapshots and are never
+    touched.
+    """
     try:
-        return set_channel(session, channel_id, body.engine_version_id)
+        promote_channel(session, channel_id, body.engine_version_id)
     except VersionError as exc:
+        # Surface the full dry-run plan errors for the operator.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    channel = get_channel(session, channel_id)
+    assert channel is not None  # promote_channel validated its existence
+    return channel
 
 
 # ---------------------------------------------------------------------------

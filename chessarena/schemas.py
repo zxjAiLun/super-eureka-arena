@@ -77,9 +77,18 @@ class SprtConfig(BaseModel):
 
 
 class EngineVersionCreate(BaseModel):
-    """S4.3E Phase 1: create an immutable EngineVersion (version == Elo
-    participant). Exactly one of build_id (production/default artifact mode)
-    or preset_id (historical/experimental snapshot mode) is required."""
+    """S4.3E Phase 1 / V2.1 controlled lifecycle: create an immutable
+    EngineVersion (version == Elo participant). Exactly one of build_id
+    (production/default artifact mode) or preset_id (historical/experimental
+    snapshot mode) is required.
+
+    The HTTP surface can only mint candidate/experimental versions —
+    hidden and unrated. status=production/historical and the public/rated
+    flags are reachable ONLY through the controlled promotion flow
+    (``POST /engine-channels/{id}/promote``); registering a known PAST
+    production directly is a backfill operation reserved for the admin CLI
+    and internal scripts.
+    """
 
     version_id: str = Field(min_length=1, max_length=100)
     display_name: str = Field(min_length=1, max_length=200)
@@ -87,9 +96,9 @@ class EngineVersionCreate(BaseModel):
     preset_id: Optional[str] = Field(default=None, min_length=1)
     command_args: Optional[list[str]] = None
     uci_options: Optional[dict] = None
-    status: str = Field(default="candidate", pattern="^(candidate|production|historical|experimental)$")
-    rating_enabled: bool = True
-    public_visible: bool = True
+    status: str = Field(
+        default="candidate", pattern="^(candidate|experimental)$"
+    )
 
 
 class EngineVersionOut(BaseModel):

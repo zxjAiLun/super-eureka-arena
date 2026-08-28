@@ -203,6 +203,32 @@ python -m chessarena.admin engine-channel promote \
     current-final ce-currentfinal-20260825 --yes  # atomic commit
 ```
 
+### HTTP surface under the same contract (V2.1 Repair 1)
+
+The old HTTP write paths could bypass the lifecycle entirely; they are now
+part of the contract:
+
+- `POST /api/v1/engine-versions` mints ONLY candidate/experimental
+  versions and always forces `public_visible=false, rating_enabled=false`
+  (the schema no longer accepts production/historical, and smuggled flags
+  are overridden). Registering a known PAST production directly remains a
+  backfill operation for the admin CLI / internal scripts with explicit
+  flags.
+- `PUT /api/v1/engine-channels/{id}` (generic repoint) returns **405** —
+  it could point a channel at a candidate while the old version stayed
+  "production", the exact half-promotion state this contract forbids.
+- `POST /api/v1/engine-channels/{id}/promote` is the controlled surface:
+  it runs the atomic `promote_channel` (full lifecycle transition, one
+  transaction). `set_channel()` stays as an internal service for
+  bootstrap/backfill only.
+- Promotion re-validates the TARGET against the CURRENT build registry:
+  build exists, `enabled=true`, and the version's frozen provenance
+  (`source_sha`, `binary_sha256`) still matches the registry. A build
+  disabled or drifted after candidate creation blocks promotion.
+- Dry-run impact counts are target-specific: rated history and active
+  tournaments are counted via the shared `resolve_participant_id`
+  resolver (legacy fingerprint matches count as the target's history).
+
 ## Checkpoint timeline (CurrentFinal lineage, narrated 2026-08-28)
 
 Engine-repo promote commits that shaped CurrentFinal, and which

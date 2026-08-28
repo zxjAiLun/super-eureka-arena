@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from ..models import (
     ENGINE_VERSION_STATUSES,
+    RESULT_TERMINAL_STATUSES,
     EngineBuild,
     EngineChannel,
     EnginePreset,
@@ -276,18 +277,65 @@ class PromotionPlan(dict):
         return not self["errors"]
 
 
+def _validate_target_build(session, target: EngineVersion) -> list[str]:
+    """Production gate: re-validate the target's frozen provenance against
+    the CURRENT EngineBuild registry.  Promotion is the only path that
+    grants production status, so it re-checks:
+
+        build exists
+        build.enabled == true
+        build.git_sha      == version.source_sha
+        build.binary_sha256 == version.binary_sha256
+
+    A build disabled after registration (artifact/probe/provenance issue)
+    therefore blocks promotion even though the version row itself looks
+    fine."""
+    errors: list[str] = []
+    build = (
+        session.query(EngineBuild)
+        .filter(EngineBuild.build_id == target.build_id)
+        .first()
+    )
+    if build is None:
+        errors.append(
+            f"target {target.version_id} references unknown build "
+            f"{target.build_id}"
+        )
+        return errors
+    if not build.enabled:
+        errors.append(
+            f"target {target.version_id} build {target.build_id} is disabled"
+        )
+    if build.git_sha != target.source_sha:
+        errors.append(
+            f"target {target.version_id} provenance mismatch: "
+            f"source_sha {target.source_sha} != registry git_sha "
+            f"{build.git_sha}"
+        )
+    if build.binary_sha256 != target.binary_sha256:
+        errors.append(
+            f"target {target.version_id} provenance mismatch: "
+            f"binary_sha256 {target.binary_sha256} != registry "
+            f"binary_sha256 {build.binary_sha256}"
+        )
+    return errors
+
+
 def plan_channel_promotion(
     session, channel_id: str, target_version_id: str
 ) -> PromotionPlan:
     """Build (but do NOT execute) a promotion plan.
 
     Pure read: zero DB mutation.  The plan lists every lifecycle transition
-    that ``promote_channel`` would perform, plus informational impact counts
-    (rated history matches for the target, active HumanGames frozen from the
-    current channel, active tournaments referencing old/new versions).
+    that ``promote_channel`` would perform, plus informational impact counts.
     Informational counts never block promotion: tournaments and human games
     run on frozen snapshots, so a promotion only affects the NEXT game
     created through the channel.
+
+    Fail-closed conditions (block promotion):
+      unknown channel / unknown target / noop / target already production
+      on another channel / target historical / target build disabled or
+      provenance-mismatched against the CURRENT registry.
     """
     from ..models import HumanGame, Tournament
 
@@ -322,6 +370,9 @@ def plan_channel_promotion(
                 f"target {target_version_id} is already production on "
                 f"another channel"
             )
+        # Production gate: the target's build must still be registered,
+        # enabled, and provenance-consistent (P1-2).
+        errors.extend(_validate_target_build(session, target))
 
     plan = PromotionPlan(
         channel_id=channel_id,
@@ -341,12 +392,26 @@ def plan_channel_promotion(
         errors=errors,
     )
 
-    # Informational impact (never blocks).
+    # Informational impact (never blocks): target-specific counts resolved
+    # through the SAME participant resolver the ratings service uses, so a
+    # legacy snapshot whose frozen fingerprint matches the target counts as
+    # the target's history.
     if target is not None:
-        plan["rated_history_matches_for_target"] = (
-            session.query(Tournament)
-            .filter(Tournament.arena_elo_enabled.is_(True))
-            .count()
+        plan["rated_history_matches_for_target"] = _count_tournaments(
+            session, target.version_id,
+            statuses=tuple(RESULT_TERMINAL_STATUSES),
+            rated_only=True,
+        )
+        plan["active_tournaments_referencing_target"] = _count_tournaments(
+            session, target.version_id,
+            statuses=("QUEUED", "RUNNING"),
+            rated_only=False,
+        )
+    if channel is not None and current_version is not None:
+        plan["active_tournaments_referencing_current"] = _count_tournaments(
+            session, current_version.version_id,
+            statuses=("QUEUED", "RUNNING"),
+            rated_only=False,
         )
     if channel is not None:
         plan["active_human_games_on_channel"] = (
@@ -355,12 +420,38 @@ def plan_channel_promotion(
             .filter(HumanGame.status == "ACTIVE")
             .count()
         )
-    plan["active_tournaments"] = (
-        session.query(Tournament)
-        .filter(Tournament.status.in_(("QUEUED", "RUNNING")))
-        .count()
-    )
     return plan
+
+
+def _count_tournaments(
+    session,
+    version_id: str,
+    *,
+    statuses: tuple,
+    rated_only: bool,
+) -> int:
+    """Tournaments whose frozen sides resolve to ``version_id`` via the
+    authoritative participant resolver (version_id match OR unique frozen
+    fingerprint match)."""
+    from ..models import Tournament
+    from .ratings import resolve_participant_id
+
+    count = 0
+    rows = (
+        session.query(Tournament)
+        .filter(Tournament.status.in_(statuses))
+        .all()
+    )
+    for t in rows:
+        if rated_only and not t.arena_elo_enabled:
+            continue
+        snap = t.config_snapshot or {}
+        for side_key in ("engine_a", "engine_b"):
+            if resolve_participant_id(session, snap.get(side_key) or {}) \
+                    == version_id:
+                count += 1
+                break
+    return count
 
 
 def _plan_version(version: EngineVersion) -> dict:
