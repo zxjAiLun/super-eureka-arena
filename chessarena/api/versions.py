@@ -18,7 +18,7 @@ V2.1 controlled lifecycle on the HTTP surface:
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from ..db import get_db
@@ -35,7 +35,7 @@ from ..schemas import (
     EngineVersionCreate,
     EngineVersionOut,
 )
-from ..security import require_same_origin
+from ..security import require_same_origin, validate_csrf_token
 from ..services.versions import (
     VersionError,
     create_version_from_build,
@@ -169,10 +169,16 @@ def promote_channel_endpoint(
 
 
 # ---------------------------------------------------------------------------
-# Admin HTML pages (read-only: immutable identity has no edit surface)
+# Admin HTML pages (V2.1-B2: timeline + guarded promotion UI)
 # ---------------------------------------------------------------------------
 @admin_router.get("/admin/versions/", response_class=HTMLResponse)
 def admin_versions_list(request: Request, session: Session = Depends(get_db)):
+    """EngineVersion TIMELINE: current production first, then history in
+    creation order, plus channel badges resolved live from EngineChannel.
+    Data comes only from EngineVersion + EngineChannel — promoting a new
+    version updates the timeline automatically. Promotes that left no
+    surviving immutable artifact are intentionally NOT nodes (the design
+    doc narrates them)."""
     versions = list_versions(session)
     channels = list_channels(session)
     channel_map: dict[str, list[str]] = {}
@@ -201,17 +207,26 @@ def admin_versions_list(request: Request, session: Session = Depends(get_db)):
                 "build_enabled": bool(build and build.enabled),
             }
         )
+    production = [r for r in rows if r["status"] == "production"]
+    timeline = [r for r in rows if r["status"] != "production"]
+    # History reads best oldest-first (0806 -> 0811 -> ...).
+    timeline.reverse()
     return request.app.state.templates.TemplateResponse(
         request,
         "admin_versions.html",
-        {"versions": rows, "settings": request.app.state.settings},
+        {
+            "production": production,
+            "timeline": timeline,
+            "settings": request.app.state.settings,
+        },
     )
 
 
 @admin_router.get("/admin/versions/{version_id}",
                   response_class=HTMLResponse)
 def admin_version_detail(
-    version_id: str, request: Request, session: Session = Depends(get_db)
+    version_id: str, request: Request, session: Session = Depends(get_db),
+    promoted: str | None = None,
 ):
     from ..services.ratings import compute_ratings, resolve_participant_id
 
@@ -228,6 +243,16 @@ def admin_version_detail(
         for c in list_channels(session)
         if c.engine_version_id == version_id
     ]
+    # V2.1-B2: the promotion entry point is offered ONLY for versions that
+    # could possibly pass the gate (candidate/experimental with the default
+    # launch identity). The REAL decision always comes from
+    # plan_channel_promotion on the preview page — this flag never
+    # authorizes anything by itself.
+    promoteable_entry = (
+        version.status in ("candidate", "experimental")
+        and not list(version.command_args or [])
+        and not dict(version.uci_options or {})
+    )
     # Current ratings by time-control pool.
     all_ratings = compute_ratings(session)
     ratings_rows = []
@@ -267,6 +292,66 @@ def admin_version_detail(
             "channels": channels,
             "ratings_rows": ratings_rows,
             "history": history,
+            "promoteable_entry": promoteable_entry,
+            "promoted": promoted,
             "settings": request.app.state.settings,
         },
+    )
+
+
+# ---------------------------------------------------------------------------
+# V2.1-B2: guarded promotion confirmation UI
+# ---------------------------------------------------------------------------
+@admin_router.get(
+    "/admin/versions/{version_id}/promote/{channel_id}",
+    response_class=HTMLResponse,
+)
+def admin_version_promote_preview(
+    version_id: str, channel_id: str, request: Request,
+    session: Session = Depends(get_db),
+):
+    """PURE PREVIEW: renders plan_channel_promotion() with zero mutation.
+
+    Blocked plans show every error and NO confirm button; only a clean plan
+    offers the confirm form. The POST re-runs the whole gate at submission
+    time — this page's plan is never trusted as input.
+    """
+    version = get_version(session, version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="engine version not found")
+    plan = plan_channel_promotion(session, channel_id, version_id)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "admin_version_promote.html",
+        {
+            "plan": dict(plan),
+            "version": version,
+            "csrf_token": getattr(request.state, "csrf_token", ""),
+            "settings": request.app.state.settings,
+        },
+    )
+
+
+@admin_router.post(
+    "/admin/versions/{version_id}/promote/{channel_id}",
+    response_class=RedirectResponse,
+    dependencies=[Depends(require_same_origin)],
+)
+async def admin_version_promote_confirm(
+    version_id: str, channel_id: str, request: Request,
+    session: Session = Depends(get_db),
+):
+    """Re-run the ENTIRE production gate at submission time via
+    promote_channel() — the GET page's plan is never trusted (the build may
+    have been disabled or the registry drifted between GET and POST)."""
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    try:
+        promote_channel(session, channel_id, version_id)
+    except VersionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    base = request.app.state.settings.base_path
+    return RedirectResponse(
+        f"{base}/admin/versions/{version_id}?promoted={channel_id}",
+        status_code=302,
     )

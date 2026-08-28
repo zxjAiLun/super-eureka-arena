@@ -1,46 +1,79 @@
 {% extends "base.html" %}
 {% block title %}ChessArena · EngineVersions{% endblock %}
 {% block content %}
-<h1>EngineVersions</h1>
+<h1>EngineVersion Timeline</h1>
 <p class="muted">
-  Permanent immutable chess identities (version == Elo participant). Immutable
-  fields are snapshotted at creation; only display/status metadata could ever
-  change — there is no edit surface for identity.
+  The CurrentFinal lineage as recorded by immutable EngineVersion
+  identities. Channel badges resolve live; promoting a new version updates
+  this timeline automatically.
 </p>
 
-{% if versions %}
-<table class="match-table">
-  <thead>
-    <tr>
-      <th>Version</th><th>Status</th><th>Build</th><th>Source SHA</th>
-      <th>Binary SHA</th><th>Command args</th><th>Channel(s)</th>
-      <th>Created</th><th>Rated</th><th>Public</th>
-    </tr>
-  </thead>
-  <tbody>
-    {% for v in versions %}
-    <tr>
-      <td>
-        <a href="{{ settings.base_path }}/admin/versions/{{ v.version_id }}">
-          {{ v.display_name }}<br><code>{{ v.version_id }}</code>
-        </a>
-      </td>
-      <td><span class="status status-{{ v.status }}">{{ v.status }}</span></td>
-      <td><code>{{ v.build_id }}</code></td>
-      <td><code>{{ v.source_sha[:12] }}</code></td>
-      <td><code>{{ v.binary_sha256[:12] }}</code></td>
-      <td><code>{{ v.command_args|join(" ") or "—" }}</code></td>
-      <td>
-        {% for ch in v.channels %}<code>{{ ch }}</code>{% if not loop.last %}, {% endif %}{% else %}&mdash;{% endfor %}
-      </td>
-      <td>{{ v.created_at|dt }}</td>
-      <td>{{ "yes" if v.rating_enabled else "no" }}</td>
-      <td>{{ "yes" if v.public_visible else "no" }}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
+{% if production %}
+<section class="panel">
+  <h3>Current production</h3>
+  {% for v in production %}
+  <p>
+    <strong>{{ v.display_name }}</strong><br>
+    <code>{{ v.version_id }}</code>
+    <span class="status status-production">production</span>
+    {% for ch in v.channels %}<code>{{ ch }}</code>{% if not loop.last %}, {% endif %}{% endfor %}
+    <br>
+    <span class="muted">
+      build <code>{{ v.build_id }}</code> ·
+      source <code>{{ v.source_sha[:12] }}</code> ·
+      binary <code>{{ v.binary_sha256[:12] }}</code> ·
+      since {{ v.created_at|dt }}
+    </span>
+  </p>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if timeline %}
+<section class="panel">
+  <h3>History</h3>
+  <table class="match-table">
+    <thead>
+      <tr>
+        <th></th><th>Version</th><th>Status</th><th>Build</th>
+        <th>Source SHA</th><th>Channel(s)</th><th>Created</th>
+        <th>Rated</th><th>Public</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in timeline %}
+      <tr>
+        <td class="muted">{{ loop.index }}.</td>
+        <td>
+          <a href="{{ settings.base_path }}/admin/versions/{{ v.version_id }}">
+            {{ v.display_name }}<br><code>{{ v.version_id }}</code>
+          </a>
+        </td>
+        <td><span class="status status-{{ v.status }}">{{ v.status }}</span></td>
+        <td><code>{{ v.build_id }}</code></td>
+        <td><code>{{ v.source_sha[:12] }}</code></td>
+        <td>
+          {% for ch in v.channels %}<code>{{ ch }}</code>{% if not loop.last %}, {% endif %}{% else %}&mdash;{% endfor %}
+        </td>
+        <td>{{ v.created_at|dt }}</td>
+        <td>{{ "yes" if v.rating_enabled else "no" }}</td>
+        <td>{{ "yes" if v.public_visible else "no" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
 {% else %}
+<p class="muted">No historical versions recorded yet.</p>
+{% endif %}
+
+{% if not production and not timeline %}
 <p class="muted">No EngineVersions registered yet.</p>
 {% endif %}
+
+<p class="muted">
+  Intermediate engine promotions without surviving immutable artifacts are
+  intentionally omitted from the EngineVersion timeline (see the design
+  doc's checkpoint lineage for the narrated history).
+</p>
 {% endblock %}

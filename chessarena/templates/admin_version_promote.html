@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · Promote {{ version.version_id }}{% endblock %}
+{% block content %}
+<p><a href="{{ settings.base_path }}/admin/versions/{{ version.version_id }}">&larr; {{ version.version_id }}</a></p>
+<h1>Promotion preview</h1>
+<p class="muted">
+  Channel <code>{{ plan.channel_id }}</code> — this page is a pure preview
+  (zero database mutation). The confirm step re-runs every production gate
+  at submission time.
+</p>
+
+<section class="panel">
+  <h3>Current</h3>
+  {% if plan.current %}
+  <p>
+    <strong>{{ plan.current.display_name }}</strong><br>
+    <code>{{ plan.current.version_id }}</code>
+    <span class="status status-{{ plan.current.status }}">{{ plan.current.status }}</span><br>
+    <span class="muted">
+      source <code>{{ plan.current.source_sha[:16] }}…</code> ·
+      binary <code>{{ plan.current.binary_sha256[:16] }}…</code>
+    </span>
+  </p>
+  {% else %}
+  <p class="muted">Channel has no current target.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h3>Target</h3>
+  {% if plan.target %}
+  <p>
+    <strong>{{ plan.target.display_name }}</strong><br>
+    <code>{{ plan.target.version_id }}</code>
+    <span class="status status-{{ plan.target.status }}">{{ plan.target.status }}</span><br>
+    <span class="muted">
+      source <code>{{ plan.target.source_sha[:16] }}…</code> ·
+      binary <code>{{ plan.target.binary_sha256[:16] }}…</code>
+    </span>
+  </p>
+  {% else %}
+  <p class="muted">Unknown target version.</p>
+  {% endif %}
+</section>
+
+{% if plan.errors %}
+<section class="panel">
+  <h3>Blocked</h3>
+  <p class="demo-error">This promotion cannot proceed:</p>
+  <ul>
+    {% for e in plan.errors %}
+    <li class="demo-error">{{ e }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<section class="panel">
+  <h3>After promotion</h3>
+  <ul>
+    {% if plan.current %}
+    <li><code>{{ plan.current.version_id }}</code> → <strong>historical</strong> (public/rated unchanged)</li>
+    {% endif %}
+    <li><code>{{ plan.target.version_id }}</code> → <strong>production</strong> (public, rated)</li>
+    <li><code>{{ plan.channel_id }}</code> → <code>{{ plan.target.version_id }}</code></li>
+  </ul>
+  <p class="muted">
+    Existing tournaments and human games run on frozen snapshots and are not
+    affected; only the next creation through the channel changes.
+  </p>
+</section>
+
+<section class="panel">
+  <h3>Impact (informational)</h3>
+  <ul class="muted">
+    <li>Rated history matches for target: {{ plan.rated_history_matches_for_target }}</li>
+    <li>Active tournaments referencing current: {{ plan.active_tournaments_referencing_current }}</li>
+    <li>Active tournaments referencing target: {{ plan.active_tournaments_referencing_target }}</li>
+    <li>Active human games frozen from channel: {{ plan.active_human_games_on_channel }}</li>
+  </ul>
+</section>
+
+<section class="panel">
+  <h3>Confirm</h3>
+  <form method="post"
+        action="{{ settings.base_path }}/admin/versions/{{ version.version_id }}/promote/{{ plan.channel_id }}">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <button type="submit" class="hp-start">Confirm promotion</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

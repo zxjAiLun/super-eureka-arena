@@ -5,6 +5,20 @@
 <h1>{{ version.display_name }}</h1>
 <p class="muted"><code>{{ version.version_id }}</code></p>
 
+{% if promoted %}
+<p class="muted">Promoted to <code>{{ promoted }}</code> — see the timeline
+  for the updated lineage.</p>
+{% endif %}
+
+{% if promoteable_entry %}
+<p>
+  <a class="action-link"
+     href="{{ settings.base_path }}/admin/versions/{{ version.version_id }}/promote/current-final">
+    Promote to current-final
+  </a>
+</p>
+{% endif %}
+
 <section class="panel">
   <h3>Immutable identity</h3>
   <dl class="result-grid">
