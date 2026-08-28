@@ -1223,8 +1223,14 @@ def admin_tournament_detail(
             run_again += f"&{side}_elo={custom_elo}"
     # V2.2-A: run-again preserves the experiment envelope so a follow-up
     # run of the same experiment group starts from the same context.
+    # BUT only for fixed-pair runs: a formal SPRT experiment cannot be
+    # "run again" through this form — the Admin New Match UI has no SPRT
+    # parameters (the formal wizard is V2.2-B), so a rerun would silently
+    # freeze a different decision contract (fixed_pairs) under the same
+    # experiment identity. Until the wizard exists, SPRT reruns must be
+    # set up deliberately, not via a misleading prefilled form.
     env = snap.get("experiment") or {}
-    if env.get("experiment_id"):
+    if env.get("experiment_id") and env.get("decision_rule") != "sprt":
         from urllib.parse import quote
 
         run_again += (
@@ -1284,7 +1290,6 @@ def admin_tournament_detail(
             "engine_b_label": engine_b_label,
             "game_analysis": game_analysis,
             "experiment": experiment,
-            "tournament_id": tournament.id,
             "rated_elo": rated_elo,
             "decisive_count": bulk_pending["decisive"],
             "losses_count": bulk_pending["losses"],

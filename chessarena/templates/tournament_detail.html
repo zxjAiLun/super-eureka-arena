@@ -10,10 +10,10 @@
 </div>
 
 {% if experiment %}
-<div id="experiment-fragment">
-  {% with tournament_id = tournament.id %}
-    {% include "_experiment_status.html" %}
-  {% endwith %}
+<div id="experiment-fragment"
+     hx-get="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/experiment-status"
+     hx-trigger="every 5s" hx-swap="innerHTML">
+  {% include "_experiment_status.html" %}
 </div>
 {% endif %}
 
@@ -31,7 +31,15 @@
   </dl>
   <p class="actions">
     <a class="action-link" href="{{ settings.base_path }}/matches/{{ tournament.id }}">Replay games</a>
-    <a class="action-link" href="{{ run_again }}">Run again</a>
+    {% if experiment and experiment.decision_rule == 'sprt' %}
+      <span class="muted">
+        Formal SPRT rerun setup is available in the upcoming experiment
+        wizard — this form cannot recreate the frozen decision contract.
+      </span>
+      <a class="action-link" href="{{ settings.base_path }}/admin/tournaments/new">New match</a>
+    {% else %}
+      <a class="action-link" href="{{ run_again }}">Run again</a>
+    {% endif %}
   </p>
 </section>
 {% endif %}

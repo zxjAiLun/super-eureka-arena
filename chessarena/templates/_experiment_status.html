@@ -1,10 +1,9 @@
-{# V2.2-A: live experiment card fragment. Rendered inline by the tournament
-   detail page and polled via htmx (every 5s) from the experiment-status
-   route. Pure read; legacy tournaments (no envelope) render nothing. #}
+{# V2.2-A: experiment card fragment. PURE HTML — no hx-* polling attributes.
+   The stable #experiment-fragment wrapper on the tournament detail page
+   owns the polling and swaps this partial's content in. Legacy tournaments
+   (no envelope) render nothing. #}
 {% if experiment %}
-<section class="panel" id="experiment-panel"
-         hx-get="{{ settings.base_path }}/admin/tournaments/{{ tournament_id }}/experiment-status"
-         hx-trigger="every 5s" hx-swap="innerHTML">
+<section class="panel" id="experiment-panel">
   <h3>Experiment</h3>
   <p>
     <strong>{{ experiment.experiment_id }}</strong>

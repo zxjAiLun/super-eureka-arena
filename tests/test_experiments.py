@@ -186,12 +186,6 @@ def test_pentanomial_matches_reference_vectors():
         [pending] + pairs) == [1, 1, 1, 1, 2]
 
 
-def test_tournament_sprt_state_matches_llr_implementation(engine_factory,
-                                                          tournament_factory):
-    """tournament_sprt_state() == sprt_llr_and_decision() on the same
-    frozen contract + pair results (worker == UI decision)."""
-
-
 def test_sprt_state_and_llr_agree(engine_factory, tournament_factory):
     """tournament_sprt_state() == sprt_llr_and_decision() on the same
     frozen contract + pair results (worker == UI decision)."""
@@ -429,3 +423,153 @@ def test_run_again_preserves_experiment(app_client, engine_factory,
     assert "experiment_id=again-exp" in r.text
     assert "experiment_stage=confirmation" in r.text
     assert "kept+on+rerun" in r.text or "kept%20on%20rerun" in r.text
+
+
+# ---------------------------------------------------------------------------
+# V2.2-A Repair 1
+# ---------------------------------------------------------------------------
+def test_sprt_experiment_run_again_not_offered(app_client, engine_factory,
+                                               registered,
+                                               tournament_factory):
+    """P2-1: a formal SPRT experiment must NOT offer the generic
+    run-again (the form cannot recreate the frozen decision contract);
+    a fixed-pair experiment keeps it."""
+    from chessarena.models import Tournament as T
+
+    tid_sprt = tournament_factory(name="rerun-sprt", pairs=4,
+                                  status=COMPLETED)
+    tid_fixed = tournament_factory(name="rerun-fixed", pairs=4,
+                                   status=COMPLETED)
+    with engine_factory() as session:
+        for tid, rule in ((tid_sprt, "sprt"), (tid_fixed, "fixed_pairs")):
+            t = session.query(T).filter(T.id == tid).one()
+            snap = dict(t.config_snapshot or {})
+            snap["experiment"] = {
+                "schema_version": 1, "experiment_id": f"rerun-{rule}",
+                "purpose": "p", "stage": "confirmation",
+                "candidate_side": "engine_a", "baseline_side": "engine_b",
+                "decision_rule": rule,
+            }
+            if rule == "sprt":
+                snap["sprt"] = {
+                    "enabled": True, "elo0": 0.0, "elo1": 10.0,
+                    "alpha": 0.05, "beta": 0.05, "max_pairs": 1000,
+                }
+            t.config_snapshot = snap
+        session.commit()
+
+    r = app_client.get(f"/chessarena/admin/tournaments/{tid_sprt}")
+    assert "upcoming experiment" in r.text and "wizard" in r.text
+    assert "New match" in r.text
+    # the prefilled run-again URL must NOT carry the experiment envelope
+    assert "experiment_id=rerun-sprt" not in r.text
+    assert ">Run again<" not in r.text
+
+    r = app_client.get(f"/chessarena/admin/tournaments/{tid_fixed}")
+    assert ">Run again<" in r.text
+    assert "experiment_id=rerun-fixed_pairs" in r.text
+
+
+def test_experiment_state_precise_mapping(engine_factory, registered,
+                                          tournament_factory):
+    """P2-2: experiment state distinguishes draft/queued/running/pausing/
+    paused/completed/cancelled/failed; SPRT terminals override."""
+    from chessarena.models import Tournament as T
+
+    cases = [
+        ("DRAFT", "draft"),
+        ("QUEUED", "queued"),
+        ("RUNNING", "running"),
+        ("PAUSING", "pausing"),
+        ("PAUSED", "paused"),
+        ("COMPLETED", "completed"),
+        ("CANCELLED", "cancelled"),
+        ("FORCE_CANCELLED", "cancelled"),
+        ("INTERRUPTED", "failed"),
+        ("FAILED", "failed"),
+    ]
+    for status, expected in cases:
+        tid = tournament_factory(name=f"state-{expected}", pairs=1,
+                                 status=status)
+        with engine_factory() as session:
+            t = session.query(T).filter(T.id == tid).one()
+            snap = dict(t.config_snapshot or {})
+            snap["experiment"] = {
+                "schema_version": 1, "experiment_id": f"state-{expected}",
+                "purpose": "p", "stage": "screening",
+                "candidate_side": "engine_a", "baseline_side": "engine_b",
+                "decision_rule": "fixed_pairs",
+            }
+            t.config_snapshot = snap
+            session.commit()
+            session.expire_all()
+            t = session.query(T).filter(T.id == tid).one()
+            view = experiments.experiment_view(t)
+            assert view["state"] == expected, (status, view["state"])
+
+    # SPRT terminals override with decision-flavored states
+    for status, expected in (
+            ("SPRT_ACCEPT_H1", "accepted_h1"),
+            ("SPRT_ACCEPT_H0", "accepted_h0"),
+            ("SPRT_MAX_PAIRS", "max_pairs")):
+        tid = tournament_factory(name=f"sprt-state-{expected}", pairs=1,
+                                 status=status)
+        with engine_factory() as session:
+            t = session.query(T).filter(T.id == tid).one()
+            snap = dict(t.config_snapshot or {})
+            snap["experiment"] = {
+                "schema_version": 1, "experiment_id": f"ss-{expected}",
+                "purpose": "p", "stage": "confirmation",
+                "candidate_side": "engine_a", "baseline_side": "engine_b",
+                "decision_rule": "sprt",
+            }
+            snap["sprt"] = {
+                "enabled": True, "elo0": 0.0, "elo1": 10.0,
+                "alpha": 0.05, "beta": 0.05, "max_pairs": 1000,
+            }
+            t.config_snapshot = snap
+            session.commit()
+            session.expire_all()
+            t = session.query(T).filter(T.id == tid).one()
+            view = experiments.experiment_view(t)
+            assert view["state"] == expected
+
+
+def test_partial_is_pure_html_no_polling_attributes(app_client,
+                                                    engine_factory,
+                                                    registered,
+                                                    tournament_factory):
+    """P1: the fragment itself carries NO hx-* polling attributes — the
+    stable #experiment-fragment wrapper owns polling, so refreshing can
+    never nest pollers or drift the polling URL."""
+    from chessarena.models import Tournament as T
+
+    tid = tournament_factory(name="partial-check", pairs=2,
+                             status=COMPLETED)
+    with engine_factory() as session:
+        t = session.query(T).filter(T.id == tid).one()
+        snap = dict(t.config_snapshot or {})
+        snap["experiment"] = {
+            "schema_version": 1, "experiment_id": "partial-check",
+            "purpose": "p", "stage": "screening",
+            "candidate_side": "engine_a", "baseline_side": "engine_b",
+            "decision_rule": "fixed_pairs",
+        }
+        t.config_snapshot = snap
+        t.completed_pairs = 2
+        session.commit()
+
+    # the fragment endpoint response contains no polling attributes
+    r = app_client.get(
+        f"/chessarena/admin/tournaments/{tid}/experiment-status")
+    assert r.status_code == 200
+    for attr in ("hx-get", "hx-trigger", "hx-swap"):
+        assert attr not in r.text, attr
+
+    # the detail page wrapper owns them, exactly once
+    r = app_client.get(f"/chessarena/admin/tournaments/{tid}")
+    assert r.text.count("hx-get=") >= 1
+    assert 'id="experiment-fragment"' in r.text
+    assert 'hx-trigger="every 5s"' in r.text
+    # the panel id appears exactly once (no nesting source)
+    assert r.text.count('id="experiment-panel"') == 1

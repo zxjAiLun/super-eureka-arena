@@ -145,6 +145,28 @@ def test_experiment_form_browser_smoke(site):
         page.url.rstrip("/") + "/experiment-status")
     assert r.status == 200
 
+    # P1 regression: let REAL htmx polling run through at least TWO
+    # refresh cycles and prove there is no panel nesting and no polling
+    # URL drift (the old bug nested a poller inside the panel and then
+    # requested /tournaments//experiment-status).
+    fragment_urls = []
+
+    def _collect(response):
+        if "/experiment-status" in response.url:
+            fragment_urls.append((response.url, response.status))
+
+    page.on("response", _collect)
+    page.wait_for_timeout(12000)  # >= 2 polling cycles at every 5s
+    panel_count = page.locator("#experiment-panel").count()
+    assert panel_count == 1, (
+        f"experiment panel nested: {panel_count} panels after polling")
+    assert len(fragment_urls) >= 2, fragment_urls
+    for url, status_code in fragment_urls:
+        assert status_code < 500, (url, status_code)
+        assert "//experiment-status" not in url.replace(
+            "://", ""), f"polling URL drifted: {url}"
+        assert "/tournaments//experiment-status" not in url, url
+
     assert not errors, errors
     assert all(s < 500 for s in statuses), \
         [s for s in statuses if s >= 500]

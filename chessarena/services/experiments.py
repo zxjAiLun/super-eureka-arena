@@ -29,9 +29,11 @@ _Sprt_TERMINAL_MAP = {
 }
 
 _EXPERIMENT_STATE_MAP = {
-    "DRAFT": "running",
-    "QUEUED": "running",
+    "DRAFT": "draft",
+    "QUEUED": "queued",
     "RUNNING": "running",
+    "PAUSING": "pausing",
+    "PAUSED": "paused",
     "COMPLETED": "completed",
     "CANCELLED": "cancelled",
     "FORCE_CANCELLED": "cancelled",
@@ -66,7 +68,7 @@ def experiment_view(tournament) -> dict | None:
     if not env:
         return None
 
-    state = _EXPERIMENT_STATE_MAP.get(tournament.status, "running")
+    state = _EXPERIMENT_STATE_MAP.get(tournament.status, "unknown")
     sprt_state = tournament_sprt_state(tournament)
     if tournament.status in _Sprt_TERMINAL_MAP:
         state = _Sprt_TERMINAL_MAP[tournament.status]
