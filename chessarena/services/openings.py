@@ -233,3 +233,33 @@ def verify_prior_opening_snapshot(
         raise CutechessLaunchError(
             "opening file on disk does not match the prior run snapshot"
         )
+
+
+def resolve_opening_plies(opening_set, requested_plies: int | None) -> int | None:
+    """The ONE opening-depth resolution contract, shared by plain match
+    creation and the formal experiment planner (V2.2-B Repair 1):
+
+    PGN book:  requested plies if given, else the manifest's
+               ``default_plies``; neither exists -> error.
+    EPD set:   plies must be None (EPD has no depth notion) -> error
+               otherwise; resolves to None.
+
+    Raises ``CutechessLaunchError`` on contract violations so callers can
+    map it to 422/plan errors uniformly.
+    """
+    fmt = _format(opening_set)
+    if fmt == "pgn":
+        plies = requested_plies
+        if plies is None:
+            plies = (opening_set.manifest or {}).get("default_plies")
+        if plies is None:
+            raise CutechessLaunchError(
+                "opening_plies required for PGN opening sets and this "
+                "book has no default plies"
+            )
+        return int(plies)
+    if requested_plies is not None:
+        raise CutechessLaunchError(
+            "opening_plies only applies to PGN opening sets"
+        )
+    return None

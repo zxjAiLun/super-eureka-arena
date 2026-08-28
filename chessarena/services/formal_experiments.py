@@ -38,11 +38,17 @@ from ..models import (
 )
 from .openings import (
     opening_fens_for_indices,
+    resolve_opening_plies,
     select_opening_indices,
     verify_prior_opening_snapshot,
 )
 from .sprt import wald_bounds
-from .versions import get_channel, get_version, identity_fingerprint
+from .versions import (
+    get_channel,
+    get_version,
+    identity_fingerprint,
+    validate_version_build_provenance,
+)
 
 BASELINE_CHANNEL = "current-final"
 
@@ -110,6 +116,22 @@ def _resolve_candidate(session, candidate_ref: str) -> tuple[dict, list]:
                 f"candidate version {ref} is historical and cannot be a "
                 f"formal candidate"
             ]
+        # A formal confirmation candidate that is an EngineVersion must be
+        # pre-production (candidate|experimental). Production versions are
+        # not formal candidates (the baseline IS the production); the UI
+        # picker is not the security boundary.
+        if version.status not in ("candidate", "experimental"):
+            return {}, [
+                f"candidate version {ref} is {version.status}; formal "
+                f"candidates must be candidate or experimental versions "
+                f"(or experimental presets)"
+            ]
+        # Re-validate the version against the CURRENT build registry
+        # (shared gate with promotion — never trust the version row alone).
+        provenance = validate_version_build_provenance(
+            session, version, label="candidate version")
+        if provenance:
+            return {}, provenance
         return {
             "kind": "version",
             "ref": version.version_id,
@@ -145,6 +167,13 @@ def _resolve_baseline(session) -> tuple[dict, list]:
             f"channel {BASELINE_CHANNEL} target {version.version_id} is "
             f"not production"
         ]
+    # The formal baseline must be runtime-ready against the CURRENT
+    # registry (same shared gate as promotion/candidates): a disabled or
+    # drifted production build blocks formal experiment creation.
+    provenance = validate_version_build_provenance(
+        session, version, label="baseline version")
+    if provenance:
+        return {}, provenance
     return {
         "kind": "version",
         "ref": version.version_id,
@@ -218,6 +247,35 @@ def plan_formal_experiment(
     errors: list[str] = []
     warnings: list[str] = []
 
+    # --- opening depth: the ONE shared resolution contract ----------------
+    # (PGN: requested or manifest default; EPD: must be None). The resolved
+    # value is what preview displays, what the digest pins and what the
+    # created snapshot freezes — identical by construction.
+    try:
+        resolved_plies = resolve_opening_plies(opening_set,
+                                               draft.opening_plies)
+    except Exception as exc:  # noqa: BLE001 — surfaced as plan errors
+        return FormalExperimentPlan(
+            ok=False,
+            errors=[f"opening plies contract violated: {exc}"],
+            warnings=[],
+            experiment={
+                "experiment_id": draft.experiment_id,
+                "purpose": draft.purpose,
+                "stage": draft.stage,
+                "decision_rule": "sprt",
+            },
+            candidate=None,
+            baseline=None,
+            sprt={},
+            opening={},
+            automatic_prior_tournament_ids=[],
+            explicit_prior_tournament_ids=[],
+            excluded_fens_count=0,
+            excluded_fens_sha256="",
+            plan_digest="",
+        )
+
     # --- baseline (always current-final) -------------------------------
     baseline, baseline_errors = _resolve_baseline(session)
     errors.extend(baseline_errors)
@@ -288,6 +346,10 @@ def plan_formal_experiment(
             t for t in priors
             if t.status in (SPRT_ACCEPT_H1, "SPRT_ACCEPT_H0",
                             "SPRT_MAX_PAIRS")
+            and ((t.config_snapshot or {}).get("experiment") or {})
+            .get("stage") == "confirmation"
+            and ((t.config_snapshot or {}).get("experiment") or {})
+            .get("decision_rule") == "sprt"
         ]
         if terminal_confirmations:
             errors.append(
@@ -361,13 +423,13 @@ def plan_formal_experiment(
         from .openings import eligible_openings
 
         try:
-            pool_all = eligible_openings(opening_set, draft.opening_plies)
+            pool_all = eligible_openings(opening_set, resolved_plies)
             eligible_before = len(pool_all)
             chosen_seed = seed if seed is not None else 0
             selected_indices = select_opening_indices(
                 opening_set,
                 draft.max_pairs,
-                draft.opening_plies,
+                resolved_plies,
                 chosen_seed,
                 exclude_fens=excluded_fens_list,
             )
@@ -375,7 +437,7 @@ def plan_formal_experiment(
             from .openings import _eligible_fens_by_index
 
             fens_by_index = _eligible_fens_by_index(
-                opening_set, draft.opening_plies, pool_all)
+                opening_set, resolved_plies, pool_all)
             pool_after = [
                 i for i in pool_all
                 if fens_by_index.get(i) not in set(excluded_fens_list)
@@ -411,7 +473,7 @@ def plan_formal_experiment(
         opening={
             "opening_set_id": opening_set.opening_set_id,
             "file_sha256": file_sha,
-            "plies": draft.opening_plies,
+            "plies": resolved_plies,
             "seed": seed,
             "eligible_before": eligible_before,
             "eligible_after": eligible_after,
@@ -429,15 +491,17 @@ def plan_formal_experiment(
     digest_payload = {
         "experiment": plan["experiment"],
         "candidate": {k: candidate.get(k) for k in (
-            "kind", "ref", "build_id", "command_args", "uci_options",
-            "binary_sha256", "fingerprint")} if candidate else None,
+            "kind", "ref", "build_id", "source_sha", "command_args",
+            "uci_options", "binary_sha256", "fingerprint")}
+        if candidate else None,
         "baseline": {k: baseline.get(k) for k in (
-            "kind", "ref", "build_id", "command_args", "uci_options",
-            "binary_sha256", "fingerprint")} if baseline else None,
+            "kind", "ref", "build_id", "source_sha", "command_args",
+            "uci_options", "binary_sha256", "fingerprint")}
+        if baseline else None,
         "sprt": sprt_contract,
         "opening_set_id": opening_set.opening_set_id,
         "opening_file_sha256": file_sha,
-        "opening_plies": draft.opening_plies,
+        "opening_plies": resolved_plies,
         "opening_seed": seed,
         "automatic_prior_tournament_ids": sorted(automatic_priors),
         "explicit_prior_tournament_ids": sorted(explicit_priors),

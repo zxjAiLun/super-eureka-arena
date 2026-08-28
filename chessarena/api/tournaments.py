@@ -295,28 +295,13 @@ def create_tournament(
     # books; seed drives reproducible sampling without replacement.
     from ..services import openings
 
-    opening_plies = body.opening_plies
+    try:
+        opening_plies = openings.resolve_opening_plies(
+            opening, body.opening_plies
+        )
+    except openings.CutechessLaunchError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     fmt = (opening.manifest or {}).get("format") or opening.format
-    if fmt == "pgn":
-        if opening_plies is None:
-            # Resolve the book/catalog default (e.g. 8moves_v3 -> 16 plies);
-            # fail at creation if there is no default — never at launch.
-            opening_plies = (opening.manifest or {}).get("default_plies")
-        if opening_plies is None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "opening_plies required for PGN opening sets and this "
-                    "book has no default plies"
-                ),
-            )
-        opening_plies = int(opening_plies)
-    else:
-        if opening_plies is not None:
-            raise HTTPException(
-                status_code=422,
-                detail="opening_plies only applies to PGN opening sets",
-            )
     opening_seed = body.opening_seed
     if opening_seed is None:
         opening_seed = random.randrange(1 << 31)
@@ -1113,6 +1098,20 @@ async def admin_formal_experiment_preview(
     if seed is None:
         seed = formal_experiments.generate_opening_seed()
         draft = draft.model_copy(update={"opening_seed": seed})
+
+    # Freeze the RESOLVED opening plies into the echoed draft (the shared
+    # resolution contract: PGN default or explicit; EPD -> None) so the
+    # preview display, the plan digest, the hidden confirm field and the
+    # created snapshot all carry the exact same value.
+    try:
+        from ..services.openings import resolve_opening_plies
+
+        resolved_plies = resolve_opening_plies(opening, draft.opening_plies)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422, detail=str(exc)) from exc
+    if resolved_plies != draft.opening_plies:
+        draft = draft.model_copy(update={"opening_plies": resolved_plies})
 
     plan = formal_experiments.plan_formal_experiment(
         session, draft, opening, seed=seed)

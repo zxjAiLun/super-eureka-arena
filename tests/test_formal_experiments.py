@@ -493,3 +493,221 @@ def test_parallel_active_run_blocked(engine_factory, registered,
             session, _draft(), opening, seed=42)
         assert not plan.ok
         assert any("active formal run" in e for e in plan["errors"])
+
+
+# ---------------------------------------------------------------------------
+# V2.2-B Repair 1
+# ---------------------------------------------------------------------------
+def _make_prior_with_env(engine_factory, tournament_factory, experiment_id,
+                         stage, status, decision_rule="sprt"):
+    """A prior tournament with an envelope + frozen opening indices."""
+    tid = tournament_factory(name=f"prior-{stage}-{status}-{experiment_id}",
+                             pairs=1, status=status)
+    _freeze_indices(engine_factory, tid, [0, 1])
+    with engine_factory() as session:
+        t = session.query(Tournament).filter(Tournament.id == tid).one()
+        snap = dict(t.config_snapshot or {})
+        snap["experiment"] = {
+            "schema_version": 1, "experiment_id": experiment_id,
+            "purpose": "p", "stage": stage,
+            "candidate_side": "engine_a", "baseline_side": "engine_b",
+            "decision_rule": decision_rule,
+        }
+        t.config_snapshot = snap
+        session.commit()
+    return tid
+
+
+def test_repair1_epd_plies_blocked_in_plan(engine_factory, registered):
+    """(2) EPD set + explicit plies -> the shared contract rejects at PLAN
+    time (no Confirm-able preview for something create_tournament would
+    422)."""
+    _scene(engine_factory, registered)
+    with engine_factory() as session:
+        opening = _get_opening_set(engine_factory)
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(opening_plies=16), opening, seed=42)
+        assert not plan.ok
+        assert any("opening plies contract violated" in e
+                   or "only applies to PGN" in e for e in plan["errors"])
+
+
+def test_repair1_production_version_candidate_blocked(engine_factory,
+                                                       registered):
+    """(4) a production EngineVersion cannot be a confirmation candidate."""
+    _scene(engine_factory, registered)
+    # register a SECOND production version (different build)
+    import hashlib
+    from pathlib import Path
+    from chessarena.models import EngineBuild as EB
+
+    build_dir = Path(registered["build_dir"]).parent / "prod2-build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    content = b"second production binary"
+    (build_dir / "engine").write_bytes(content)
+    m3 = {
+        "build_id": "prod2-build", "git_sha": "f" * 40,
+        "binary_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    with engine_factory() as session:
+        session.add(EB(
+            build_id="prod2-build", engine_name="Test",
+            git_sha=m3["git_sha"], binary_path=str(build_dir / "engine"),
+            binary_sha256=m3["binary_sha256"], platform="x86_64",
+            supported_profiles=[], manifest=m3, enabled=True,
+        ))
+        versions.create_version_from_build(
+            session, version_id="ce-other-prod",
+            display_name="Other Production",
+            build_id="prod2-build", command_args=[], uci_options={},
+            status="production", rating_enabled=True, public_visible=True,
+        )
+        session.commit()
+
+        opening = _get_opening_set(engine_factory)
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(candidate="version:ce-other-prod"),
+            opening, seed=42)
+        assert not plan.ok
+        assert any(
+            "must be candidate or experimental versions" in e
+            for e in plan["errors"])
+
+
+def test_repair1_candidate_version_build_drift_blocked(
+    engine_factory, registered
+):
+    """(5) a candidate EngineVersion whose build was disabled or drifted
+    after registration is blocked by the shared provenance gate."""
+    _scene(engine_factory, registered)
+    import hashlib
+    from pathlib import Path
+    from chessarena.models import EngineBuild as EB
+
+    build_dir = Path(registered["build_dir"]).parent / "vercand-build"
+    build_dir.mkdir(parents=True, exist_ok=True)
+    content = b"version candidate binary"
+    (build_dir / "engine").write_bytes(content)
+    m4 = {
+        "build_id": "vercand-build", "git_sha": "1" * 40,
+        "binary_sha256": hashlib.sha256(content).hexdigest(),
+    }
+    with engine_factory() as session:
+        session.add(EB(
+            build_id="vercand-build", engine_name="Test",
+            git_sha=m4["git_sha"], binary_path=str(build_dir / "engine"),
+            binary_sha256=m4["binary_sha256"], platform="x86_64",
+            supported_profiles=[], manifest=m4, enabled=True,
+        ))
+        versions.create_version_from_build(
+            session, version_id="ce-ver-cand",
+            display_name="Version Candidate",
+            build_id="vercand-build", command_args=[], uci_options={},
+            status="candidate",
+        )
+        session.commit()
+
+        opening = _get_opening_set(engine_factory)
+        # healthy candidate plans fine
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(candidate="version:ce-ver-cand"),
+            opening, seed=42)
+        assert plan.ok, plan["errors"]
+
+    # (a) disable the build -> blocked
+    with engine_factory() as session:
+        b = session.query(EB).filter(EB.build_id == "vercand-build").one()
+        b.enabled = False
+        session.commit()
+        opening = _get_opening_set(engine_factory)
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(candidate="version:ce-ver-cand"),
+            opening, seed=42)
+        assert not plan.ok
+        assert any("disabled" in e for e in plan["errors"])
+        b.enabled = True
+        session.commit()
+
+    # (b) git_sha drift -> blocked (provenance mismatch)
+    with engine_factory() as session:
+        b = session.query(EB).filter(EB.build_id == "vercand-build").one()
+        b.git_sha = "9" * 40
+        session.commit()
+        opening = _get_opening_set(engine_factory)
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(candidate="version:ce-ver-cand"),
+            opening, seed=42)
+        assert not plan.ok
+        assert any("provenance mismatch" in e for e in plan["errors"])
+
+
+def test_repair1_baseline_build_drift_blocked(engine_factory, registered):
+    """(6) the current-final baseline's build disabled/drifted -> formal
+    preview blocked."""
+    _scene(engine_factory, registered)
+    from chessarena.models import EngineBuild as EB
+
+    manifest = json.loads(
+        (registered["build_dir"] / "manifest.json").read_text(encoding="utf-8")
+    )
+    with engine_factory() as session:
+        b = session.query(EB).filter(
+            EB.build_id == manifest["build_id"]).one()
+        b.enabled = False
+        session.commit()
+        opening = _get_opening_set(engine_factory)
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(), opening, seed=42)
+        assert not plan.ok
+        assert any("baseline" in e and "disabled" in e
+                   for e in plan["errors"])
+        b.enabled = True
+        # binary drift on the baseline build
+        b.binary_sha256 = "2" * 64
+        session.commit()
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(), opening, seed=42)
+        assert not plan.ok
+        assert any("baseline" in e and "provenance mismatch" in e
+                   for e in plan["errors"])
+
+
+def test_repair1_screening_terminal_does_not_block_confirmation(
+    engine_factory, registered, tournament_factory
+):
+    """(7) a SCREENING SPRT terminal of the same experiment does NOT block
+    a formal confirmation (only its openings are excluded)."""
+    _scene(engine_factory, registered)
+    tid = _make_prior_with_env(engine_factory, tournament_factory,
+                               "s10-x-nnue", "screening", SPRT_ACCEPT_H1)
+    with engine_factory() as session:
+        opening = _get_opening_set(engine_factory)
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(), opening, seed=42)
+        assert plan.ok, plan["errors"]
+        # the screening run's openings are still automatically excluded
+        assert plan["automatic_prior_tournament_ids"] == [tid]
+        assert plan["excluded_fens_count"] > 0
+
+
+def test_repair1_confirmation_terminal_blocks_second_confirmation(
+    engine_factory, registered, tournament_factory
+):
+    """(8) a true CONFIRMATION SPRT terminal blocks a second formal
+    confirmation of the same experiment."""
+    _scene(engine_factory, registered)
+    # a confirmation terminal
+    _make_prior_with_env(engine_factory, tournament_factory,
+                         "s10-x-nnue", "confirmation", "SPRT_ACCEPT_H0")
+    # a benchmark MAX_PAIRS (also terminal, but NOT a confirmation — must
+    # not be the blocker)
+    _make_prior_with_env(engine_factory, tournament_factory,
+                         "s10-x-nnue", "benchmark", "SPRT_MAX_PAIRS")
+    with engine_factory() as session:
+        opening = _get_opening_set(engine_factory)
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(), opening, seed=42)
+        assert not plan.ok
+        assert any(
+            "do not reopen a terminated sequential test" in e
+            for e in plan["errors"])

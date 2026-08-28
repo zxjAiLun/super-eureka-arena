@@ -254,3 +254,115 @@ def test_csrf_required(app_client, engine_factory, registered):
         "/chessarena/admin/experiments/formal/preview",
         data=_form("wrong"), follow_redirects=False)
     assert r.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# V2.2-B Repair 1 (wizard level)
+# ---------------------------------------------------------------------------
+def _register_pgn_book(engine_factory, registered, *, default_plies=12,
+                       opening_set_id="pgn-book", count=3):
+    import hashlib
+    from pathlib import Path
+    from chessarena.models import OpeningSet as OS
+
+    games = [
+        "1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7",
+        "1. d4 d5 2. c4 e6 3. Nc3 Nf6 4. Bg5 Be7 5. e3 O-O",
+        "1. c4 e5 2. Nc3 Nf6 3. Nf3 Nc6 4. g3 d5 5. cxd5 Nxd5",
+    ][:count]
+    p = Path(registered["opening_dir"]).parent / "pgn-book.pgn"
+    p.write_text(
+        "".join(
+            f'[Event "test {i}"]\n[White "W"]\n[Black "B"]\n\n{m}\n\n'
+            for i, m in enumerate(games)
+        ),
+        encoding="utf-8")
+    sha = hashlib.sha256(p.read_bytes()).hexdigest()
+    with engine_factory() as session:
+        session.add(OS(
+            opening_set_id=opening_set_id, file_path=str(p), sha256=sha,
+            position_count=count, format="pgn", source="test",
+            manifest={"format": "pgn", "default_plies": default_plies},
+            enabled=True,
+        ))
+        session.commit()
+    return opening_set_id, default_plies
+
+
+def test_repair1_pgn_default_plies_consistent(app_client, engine_factory,
+                                               registered):
+    """(1) PGN book + blank plies: preview resolves the manifest default,
+    and the created snapshot freezes exactly that value + the preview's
+    indices hash."""
+    _scene(engine_factory, registered)
+    book_id, default_plies = _register_pgn_book(
+        engine_factory, registered, default_plies=8, count=3)
+    token = _csrf(app_client)
+    form = _form(token, opening_set_id=book_id, max_pairs=2,
+                 opening_plies="")
+    digest, seed = _preview_and_extract(app_client, token, form)
+    form.update({"opening_seed": seed, "plan_digest": digest,
+                 "opening_plies": ""})  # hidden field echoes RESOLVED value
+    # extract the resolved plies the preview echoed
+    r = app_client.post(
+        "/chessarena/admin/experiments/formal/preview", data=form)
+    import re
+    resolved = re.search(
+        r'name="opening_plies" value="(\d+)"', r.text).group(1)
+    form["opening_plies"] = resolved
+
+    r = app_client.post(
+        "/chessarena/admin/experiments/formal/create", data=form,
+        follow_redirects=False)
+    assert r.status_code == 303, r.text[:300]
+    tid = r.headers["location"].rsplit("/", 1)[-1]
+    with engine_factory() as session:
+        t = session.get(Tournament, tid)
+        snap = t.config_snapshot
+        assert snap["opening_set"]["plies"] == default_plies
+        # formal_protocol selected-indices hash matches the snapshot
+        import hashlib as h
+        idx = snap["opening_set"]["indices"]
+        assert snap["formal_protocol"]["selected_indices_sha256"] == h.sha256(
+            json.dumps(idx, sort_keys=True,
+                       separators=(",", ":")).encode()).hexdigest()
+
+
+def test_repair1_git_sha_only_drift_409(app_client, engine_factory,
+                                        registered):
+    """(3) after preview, ONLY the candidate build's git_sha changes
+    (binary/args/opts untouched) -> digest changes -> 409, zero creation."""
+    _scene(engine_factory, registered)
+    token = _csrf(app_client)
+    form = _form(token)
+    digest, seed = _preview_and_extract(app_client, token, form)
+    form.update({"opening_seed": seed, "plan_digest": digest})
+
+    # drift ONLY git_sha on the candidate's build
+    with engine_factory() as session:
+        b = session.query(EngineBuild).filter(
+            EngineBuild.build_id == "cand-build").one()
+        b.git_sha = "z" * 40
+        session.commit()
+
+    r = app_client.post(
+        "/chessarena/admin/experiments/formal/create", data=form,
+        follow_redirects=False)
+    assert r.status_code == 409, r.text[:200]
+    with engine_factory() as session:
+        assert session.query(Tournament).filter(
+            Tournament.name == "s10-wizard-test").first() is None
+
+
+def test_repair1_epd_plies_preview_422(app_client, engine_factory,
+                                       registered):
+    """(2) EPD set + explicit plies -> the PREVIEW itself is rejected with
+    422 (no Confirm surface for a contract create would reject)."""
+    _scene(engine_factory, registered)
+    token = _csrf(app_client)
+    r = app_client.post(
+        "/chessarena/admin/experiments/formal/preview",
+        data=_form(token, opening_plies="16"),
+        follow_redirects=False)
+    assert r.status_code == 422
+    assert "opening_plies" in r.text or "plies" in r.text

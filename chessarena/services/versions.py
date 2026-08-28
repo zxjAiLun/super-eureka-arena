@@ -277,48 +277,56 @@ class PromotionPlan(dict):
         return not self["errors"]
 
 
-def _validate_target_build(session, target: EngineVersion) -> list[str]:
-    """Production gate: re-validate the target's frozen provenance against
-    the CURRENT EngineBuild registry.  Promotion is the only path that
-    grants production status, so it re-checks:
+def validate_version_build_provenance(
+    session, version: EngineVersion, *, label: str = "target"
+) -> list[str]:
+    """Runtime/provenance re-validation of an EngineVersion against the
+    CURRENT EngineBuild registry. Shared by every production-grade flow
+    (channel promotion, formal experiments) so there is ONE gate:
 
         build exists
         build.enabled == true
-        build.git_sha      == version.source_sha
+        build.git_sha       == version.source_sha
         build.binary_sha256 == version.binary_sha256
 
-    A build disabled after registration (artifact/probe/provenance issue)
-    therefore blocks promotion even though the version row itself looks
-    fine."""
+    Returns a list of human-readable errors (empty = valid)."""
     errors: list[str] = []
     build = (
         session.query(EngineBuild)
-        .filter(EngineBuild.build_id == target.build_id)
+        .filter(EngineBuild.build_id == version.build_id)
         .first()
     )
     if build is None:
         errors.append(
-            f"target {target.version_id} references unknown build "
-            f"{target.build_id}"
+            f"{label} {version.version_id} references unknown build "
+            f"{version.build_id}"
         )
         return errors
     if not build.enabled:
         errors.append(
-            f"target {target.version_id} build {target.build_id} is disabled"
+            f"{label} {version.version_id} build {version.build_id} "
+            f"is disabled"
         )
-    if build.git_sha != target.source_sha:
+    if build.git_sha != version.source_sha:
         errors.append(
-            f"target {target.version_id} provenance mismatch: "
-            f"source_sha {target.source_sha} != registry git_sha "
+            f"{label} {version.version_id} provenance mismatch: "
+            f"source_sha {version.source_sha} != registry git_sha "
             f"{build.git_sha}"
         )
-    if build.binary_sha256 != target.binary_sha256:
+    if build.binary_sha256 != version.binary_sha256:
         errors.append(
-            f"target {target.version_id} provenance mismatch: "
-            f"binary_sha256 {target.binary_sha256} != registry "
+            f"{label} {version.version_id} provenance mismatch: "
+            f"binary_sha256 {version.binary_sha256} != registry "
             f"binary_sha256 {build.binary_sha256}"
         )
     return errors
+
+
+def _validate_target_build(session, target: EngineVersion) -> list[str]:
+    """Production gate for promotion: the target's frozen provenance must
+    still match the CURRENT registry (thin wrapper over the shared
+    validator)."""
+    return validate_version_build_provenance(session, target)
 
 
 def _validate_production_launch_identity(target: EngineVersion) -> list[str]:
