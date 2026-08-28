@@ -45,7 +45,7 @@ def _wait_until_up(url: str, timeout: float = 40.0) -> None:
 
 
 @pytest.fixture()
-def admin_site(settings, engine_factory, registered):
+def admin_site(settings, engine_factory, registered, monkeypatch):
     import json
 
     manifest = json.loads(
@@ -85,13 +85,18 @@ def admin_site(settings, engine_factory, registered):
         ("ARENA_CUTECHESS", str(settings.cutechess)),
         ("ARENA_BASE_PATH", settings.base_path),
     ):
-        os.environ[key] = value
+        # monkeypatch (not os.environ): every value is restored when the
+        # fixture tears down, so later tests in the same pytest process
+        # never inherit this smoke's temporary environment.
+        monkeypatch.setenv(key, value)
 
     port = _free_port()
     # The create/promote POSTs carry a browser Origin header; the
     # same-origin contract compares against ARENA_PUBLIC_URL, so point it
     # at the live server the browser actually talks to.
-    os.environ["ARENA_PUBLIC_URL"] = f"http://127.0.0.1:{port}/chessarena"
+    monkeypatch.setenv(
+        "ARENA_PUBLIC_URL", f"http://127.0.0.1:{port}/chessarena"
+    )
     proc = subprocess.Popen(
         [
             sys.executable, "-m", "uvicorn", "chessarena.main:create_app",
@@ -162,3 +167,22 @@ def test_admin_lifecycle_browser_smoke(admin_site):
     assert not errors, errors
     assert all(s < 500 for s in responses), \
         [s for s in responses if s >= 500]
+
+
+def test_admin_site_env_restored_after_fixture():
+    """P2-3 regression: after test_admin_lifecycle_browser_smoke ran the
+    admin_site fixture, no ARENA_* leak may persist. Executed AFTER the
+    smoke by file order: the smoke's monkeypatched values must be gone —
+    specifically ARENA_PUBLIC_URL must not still point at the smoke
+    server's ephemeral port."""
+    import os
+    public = os.environ.get("ARENA_PUBLIC_URL")
+    if public is not None:
+        # restored to whatever it was before the smoke (or absent); it
+        # must never remain the smoke's ephemeral localhost URL.
+        assert not _is_ephemeral_smoke_url(public)
+
+
+def _is_ephemeral_smoke_url(url: str) -> bool:
+    import re
+    return bool(re.match(r"^http://127\.0\.0\.1:\d+/chessarena$", url))

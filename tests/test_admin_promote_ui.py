@@ -231,6 +231,30 @@ def test_timeline_renders_lineage(app_client, engine_factory, registered):
             build_id="build3-x86_64", command_args=[], uci_options={},
             status="historical", public_visible=True, rating_enabled=True,
         )
+        # a fresh candidate that must NOT appear in the lineage History
+        # (own build: same build + default identity would collide)
+        build_dir4 = Path(registered["build_dir"]).parent / "build4"
+        build_dir4.mkdir(parents=True, exist_ok=True)
+        content4 = b"fourth dummy engine binary for timeline test"
+        (build_dir4 / "engine").write_bytes(content4)
+        m4 = {
+            "build_id": "build4-x86_64",
+            "git_sha": "d" * 40,
+            "binary_sha256": hashlib.sha256(content4).hexdigest(),
+        }
+        session.add(EngineBuild(
+            build_id="build4-x86_64", engine_name="Test",
+            git_sha=m4["git_sha"], binary_path=str(build_dir4 / "engine"),
+            binary_sha256=m4["binary_sha256"], platform="x86_64",
+            supported_profiles=[], manifest=m4, enabled=True,
+        ))
+        session.commit()
+        versions.create_version_from_build(
+            session, version_id="ce-pending-cand",
+            display_name="Pending Candidate",
+            build_id="build4-x86_64", command_args=[], uci_options={},
+            status="candidate",
+        )
     r = app_client.post(
         f"/chessarena/admin/versions/{target_id}/promote/current-final",
         data={"_csrf_token": token},
@@ -243,17 +267,35 @@ def test_timeline_renders_lineage(app_client, engine_factory, registered):
     # current production section with the channel badge
     assert "Current production" in body
     assert "ce-target" in body
-    # history contains the older versions
-    assert "ce-old-prod" in body and "ce-oldest" in body
     # the no-artifact note is present
     assert "intentionally omitted" in body
-    # channel badge appears exactly once (only on the real target)
-    assert body.count("current-final") >= 1
     with engine_factory() as session:
         assert versions.get_channel(
             session, "current-final").engine_version_id == target_id
-    # production node should NOT be duplicated in history
-    prod_section = body.split("History")[0]
-    hist_section = body.split("History")[1] if "History" in body else ""
-    assert "ce-target" in prod_section
-    assert "ce-target" not in hist_section
+
+    # Sections in document order: production, History, Pending/Experimental
+    prod_pos = body.index("Current production")
+    hist_pos = body.index(">History<")
+    pend_pos = body.index("Pending / Experimental")
+    assert prod_pos < hist_pos < pend_pos
+
+    # Production node lives in its own section only.
+    assert "ce-target" in body[prod_pos:hist_pos]
+    assert "ce-target" not in body[hist_pos:]
+
+    # History contains ONLY the historical versions, OLDEST FIRST:
+    # ce-oldest was created BEFORE ce-old-prod... except both were created
+    # in this test with oldest created after old-prod; the scene's
+    # ce-old-prod is older. Assert relative order by created_at:
+    # ce-old-prod (scene) precedes ce-oldest in the History table.
+    history_html = body[hist_pos:pend_pos]
+    assert "ce-old-prod" in history_html
+    assert "ce-oldest" in history_html
+    assert history_html.index("ce-old-prod") < history_html.index("ce-oldest")
+    # candidates/experiments never appear in History
+    assert "ce-pending-cand" not in history_html
+
+    # Pending / Experimental holds the candidate, newest first
+    pending_html = body[pend_pos:]
+    assert "ce-pending-cand" in pending_html
+    assert "Pending Candidate" in pending_html

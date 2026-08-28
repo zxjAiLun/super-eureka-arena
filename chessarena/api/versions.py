@@ -208,15 +208,24 @@ def admin_versions_list(request: Request, session: Session = Depends(get_db)):
             }
         )
     production = [r for r in rows if r["status"] == "production"]
-    timeline = [r for r in rows if r["status"] != "production"]
-    # History reads best oldest-first (0806 -> 0811 -> ...).
-    timeline.reverse()
+    # The CurrentFinal lineage: ONLY historical versions belong here —
+    # candidates/experiments are pre-lineage and get their own section, so
+    # the timeline never fills with failed/rejected experiments.
+    # list_versions is created_at-asc, which IS the oldest -> newest order
+    # the lineage should read in (0806 -> 0811 -> ...).
+    history = [r for r in rows if r["status"] == "historical"]
+    # Pending work reads best newest-first.
+    pending = [
+        r for r in reversed(rows)
+        if r["status"] in ("candidate", "experimental")
+    ]
     return request.app.state.templates.TemplateResponse(
         request,
         "admin_versions.html",
         {
             "production": production,
-            "timeline": timeline,
+            "history": history,
+            "pending": pending,
             "settings": request.app.state.settings,
         },
     )

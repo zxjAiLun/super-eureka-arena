@@ -29,7 +29,7 @@
 </section>
 {% endif %}
 
-{% if timeline %}
+{% if history %}
 <section class="panel">
   <h3>History</h3>
   <table class="match-table">
@@ -41,7 +41,7 @@
       </tr>
     </thead>
     <tbody>
-      {% for v in timeline %}
+      {% for v in history %}
       <tr>
         <td class="muted">{{ loop.index }}.</td>
         <td>
@@ -63,11 +63,44 @@
     </tbody>
   </table>
 </section>
-{% else %}
-<p class="muted">No historical versions recorded yet.</p>
 {% endif %}
 
-{% if not production and not timeline %}
+{% if pending %}
+<section class="panel">
+  <h3>Pending / Experimental</h3>
+  <p class="muted">
+    Candidates and experiments — not part of the production lineage until
+    promoted.
+  </p>
+  <table class="match-table">
+    <thead>
+      <tr>
+        <th>Version</th><th>Status</th><th>Build</th>
+        <th>Source SHA</th><th>Created</th><th>Rated</th><th>Public</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for v in pending %}
+      <tr>
+        <td>
+          <a href="{{ settings.base_path }}/admin/versions/{{ v.version_id }}">
+            {{ v.display_name }}<br><code>{{ v.version_id }}</code>
+          </a>
+        </td>
+        <td><span class="status status-{{ v.status }}">{{ v.status }}</span></td>
+        <td><code>{{ v.build_id }}</code></td>
+        <td><code>{{ v.source_sha[:12] }}</code></td>
+        <td>{{ v.created_at|dt }}</td>
+        <td>{{ "yes" if v.rating_enabled else "no" }}</td>
+        <td>{{ "yes" if v.public_visible else "no" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% if not production and not history and not pending %}
 <p class="muted">No EngineVersions registered yet.</p>
 {% endif %}
 
