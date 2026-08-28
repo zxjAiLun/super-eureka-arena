@@ -10,6 +10,21 @@
   tournament matching both use it.
 - Two immutable configs with different version_ids but the SAME fingerprint
   are rejected in Phase 1.
+
+Immutability contract (V2.1, frozen): "immutable" refers to the CHESS /
+LAUNCH identity only — the fields ``version_id, build_id, command_args,
+uci_options, source_sha, binary_sha256, identity_fingerprint`` can never
+change after creation.  The lifecycle metadata ``status, public_visible,
+rating_enabled`` is mutable, but ONLY through the controlled promotion flow
+(``promote_channel``) — never ad-hoc edits.  A version's identity is WHO THE
+BINARY IS, not which semantic promote-commit it corresponds to.
+
+Channel promotion contract: ``promote_channel`` performs the whole
+demote-old → promote-new → repoint-channel sequence in ONE transaction; any
+failure rolls back everything (no half-promotion states).  It never touches
+existing frozen snapshots: tournaments froze their config at creation and
+HumanGames froze their opponent snapshot at creation, so a promotion affects
+only the NEXT game created through the channel.
 """
 
 from __future__ import annotations
@@ -109,12 +124,19 @@ def create_version_from_build(
     command_args: list | None = None,
     uci_options: dict | None = None,
     status: str = "candidate",
-    rating_enabled: bool = True,
-    public_visible: bool = True,
+    rating_enabled: bool = False,
+    public_visible: bool = False,
 ) -> EngineVersion:
     """Production/default artifact mode: launch identity is the artifact's
     default behavior; source/binary identity comes from the registered build
-    (never from caller-provided values)."""
+    (never from caller-provided values).
+
+    V2.1 controlled lifecycle: a fresh version defaults to candidate /
+    hidden / unrated; the promotion flow flips it to production / public /
+    rated.  Callers that deliberately want another initial lifecycle (e.g.
+    registering a KNOWN past production directly as historical) pass the
+    flags explicitly.
+    """
     build = _build_or_error(session, build_id)
     args = list(command_args or [])
     opts = dict(uci_options or {})
@@ -143,12 +165,17 @@ def create_version_from_preset(
     display_name: str,
     preset_id: str,
     build_id: str | None = None,
-    status: str = "historical",
-    rating_enabled: bool = True,
-    public_visible: bool = True,
+    status: str = "candidate",
+    rating_enabled: bool = False,
+    public_visible: bool = False,
 ) -> EngineVersion:
     """Historical/experimental profile mode: SNAPSHOT the preset's launch
-    configuration at creation; later preset edits are irrelevant."""
+    configuration at creation; later preset edits are irrelevant.
+
+    Same controlled-lifecycle defaults as ``create_version_from_build``
+    (candidate / hidden / unrated unless explicitly overridden, e.g. when
+    registering a known past production directly as historical).
+    """
     preset = (
         session.query(EnginePreset)
         .filter(EnginePreset.preset_id == preset_id)
@@ -236,3 +263,157 @@ def get_channel(session, channel_id: str) -> EngineChannel | None:
 
 def list_channels(session) -> list[EngineChannel]:
     return session.query(EngineChannel).order_by(EngineChannel.channel_id).all()
+
+
+# ---------------------------------------------------------------------------
+# Channel promotion (V2.1)
+# ---------------------------------------------------------------------------
+class PromotionPlan(dict):
+    """Renderable dry-run plan. Dict subkeys are JSON-stable for logging."""
+
+    @property
+    def ok(self) -> bool:
+        return not self["errors"]
+
+
+def plan_channel_promotion(
+    session, channel_id: str, target_version_id: str
+) -> PromotionPlan:
+    """Build (but do NOT execute) a promotion plan.
+
+    Pure read: zero DB mutation.  The plan lists every lifecycle transition
+    that ``promote_channel`` would perform, plus informational impact counts
+    (rated history matches for the target, active HumanGames frozen from the
+    current channel, active tournaments referencing old/new versions).
+    Informational counts never block promotion: tournaments and human games
+    run on frozen snapshots, so a promotion only affects the NEXT game
+    created through the channel.
+    """
+    from ..models import HumanGame, Tournament
+
+    errors: list[str] = []
+    channel = get_channel(session, channel_id)
+    current_version: EngineVersion | None = None
+    if channel is None:
+        errors.append(f"unknown channel {channel_id}")
+    else:
+        current_version = get_version(session, channel.engine_version_id)
+        if current_version is None:
+            errors.append(
+                f"channel {channel_id} points at unknown version "
+                f"{channel.engine_version_id}"
+            )
+    target = get_version(session, target_version_id)
+    if target is None:
+        errors.append(f"unknown engine_version_id {target_version_id}")
+    elif channel is not None and current_version is not None:
+        if target.version_id == current_version.version_id:
+            errors.append(
+                f"channel {channel_id} already points at "
+                f"{target_version_id}"
+            )
+        if target.status == "historical":
+            errors.append(
+                f"target {target_version_id} is historical and cannot be "
+                f"promoted"
+            )
+        if target.status == "production":
+            errors.append(
+                f"target {target_version_id} is already production on "
+                f"another channel"
+            )
+
+    plan = PromotionPlan(
+        channel_id=channel_id,
+        current=None if current_version is None else _plan_version(
+            current_version
+        ),
+        target=None if target is None else _plan_version(target),
+        after={
+            "old_status": (
+                "historical" if current_version is not None else None
+            ),
+            "target_status": "production",
+            "target_public_visible": True,
+            "target_rating_enabled": True,
+            "channel_points_to": target_version_id,
+        },
+        errors=errors,
+    )
+
+    # Informational impact (never blocks).
+    if target is not None:
+        plan["rated_history_matches_for_target"] = (
+            session.query(Tournament)
+            .filter(Tournament.arena_elo_enabled.is_(True))
+            .count()
+        )
+    if channel is not None:
+        plan["active_human_games_on_channel"] = (
+            session.query(HumanGame)
+            .filter(HumanGame.opponent_ref == f"channel:{channel_id}")
+            .filter(HumanGame.status == "ACTIVE")
+            .count()
+        )
+    plan["active_tournaments"] = (
+        session.query(Tournament)
+        .filter(Tournament.status.in_(("QUEUED", "RUNNING")))
+        .count()
+    )
+    return plan
+
+
+def _plan_version(version: EngineVersion) -> dict:
+    return {
+        "version_id": version.version_id,
+        "display_name": version.display_name,
+        "build_id": version.build_id,
+        "source_sha": version.source_sha,
+        "binary_sha256": version.binary_sha256,
+        "identity_fingerprint": version.identity_fingerprint,
+        "status": version.status,
+    }
+
+
+def promote_channel(
+    session, channel_id: str, target_version_id: str
+) -> PromotionPlan:
+    """Atomically promote ``target_version_id`` on ``channel_id``.
+
+    Single transaction:
+        old production  → historical (public/rating untouched)
+        target          → production + public_visible + rating_enabled
+        channel         → target
+    Any failure (validation, DB error) rolls back EVERYTHING — no partial
+    demotion, no channel drift.  Immutable fields are never touched; callers
+    can diff them byte-for-byte before/after to prove it.
+
+    Existing tournaments/HumanGames run on frozen snapshots and are not
+    affected; the promotion only changes what the channel resolves to for
+    the NEXT creation.
+    """
+    plan = plan_channel_promotion(session, channel_id, target_version_id)
+    if not plan.ok:
+        raise VersionError("; ".join(plan["errors"]))
+
+    try:
+        current_version = get_version(session, plan["current"]["version_id"])
+        target = get_version(session, target_version_id)
+        # Demote the old production (lifecycle metadata only).
+        current_version.status = "historical"
+        session.add(current_version)
+        # Promote the target (lifecycle metadata only).
+        target.status = "production"
+        target.public_visible = True
+        target.rating_enabled = True
+        session.add(target)
+        # Repoint the channel.
+        channel = get_channel(session, channel_id)
+        channel.engine_version_id = target_version_id
+        channel.updated_at = utcnow()
+        session.add(channel)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return plan

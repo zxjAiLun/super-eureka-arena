@@ -33,6 +33,7 @@ def test_admin_versions_list(app_client, engine_factory, registered):
             display_name="CurrentFinal · Test · 2026-08-11",
             build_id="20260811-26604c4-linux-x86_64",
             status="production",
+            public_visible=True, rating_enabled=True,
         )
         versions.set_channel(session, "current-final", "ce-test-20260811")
     r = app_client.get("/chessarena/admin/versions/")
@@ -58,6 +59,7 @@ def test_admin_version_detail(app_client, engine_factory, tournament_factory,
             display_name="CurrentFinal · Test · 2026-08-11",
             build_id="20260811-26604c4-linux-x86_64",
             status="production",
+            public_visible=True, rating_enabled=True,
         )
         versions.set_channel(session, "current-final", "ce-test-20260811")
         tid = tournament_factory(name="version-match", pairs=1,
@@ -108,6 +110,7 @@ def test_admin_version_detail_matches_legacy_fingerprint(
             display_name="CurrentFinal · Test · 2026-08-11",
             build_id="20260811-26604c4-linux-x86_64",
             status="production",
+            public_visible=True, rating_enabled=True,
         )
         fingerprint = v.identity_fingerprint
         tid = tournament_factory(name="legacy-fp-match", pairs=1,

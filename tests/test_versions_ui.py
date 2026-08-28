@@ -21,6 +21,7 @@ def _make_version(engine_factory, registered, version_id="ce-ui-v1",
             build_id=manifest["build_id"],
             command_args=command_args or [],
             status="production",
+            public_visible=True, rating_enabled=True,
         )
     return manifest
 

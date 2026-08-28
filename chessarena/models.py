@@ -175,12 +175,21 @@ ENGINE_VERSION_STATUSES = frozenset(
 
 
 class EngineVersion(Base):
-    """Permanent immutable chess identity == Elo participant.
+    """Permanent immutable CHESS/LAUNCH identity == Elo participant.
 
     ``version_id`` is the rating participant identity (NOT display_name and
     NOT the anonymous fingerprint). Launch configuration is SNAPSHOTTED at
     creation (build_id, command_args, uci_options, source_sha,
     binary_sha256); later EnginePreset edits never affect it.
+
+    V2.1 immutability contract: "immutable" covers exactly the identity
+    fields above — they can never change after creation. The lifecycle
+    metadata (``status``, ``public_visible``, ``rating_enabled``) is mutable
+    but ONLY via the controlled promotion flow
+    (``services.versions.promote_channel``): candidate (hidden, unrated)
+    -> production (public, rated) -> historical. Never edit it ad hoc.
+    The identity is WHO THE BINARY IS (source_sha/binary_sha256/launch
+    config), not which semantic promote-commit it corresponds to.
     """
 
     __tablename__ = "engine_versions"
@@ -214,8 +223,12 @@ class EngineVersion(Base):
 class EngineChannel(Base):
     """Mutable alias (e.g. ``current-final``) pointing at one EngineVersion.
 
-    Promotion = repoint the channel; neither EngineVersion is ever mutated.
-    The channel itself is not a participant and carries no rating.
+    Promotion = repoint the channel via the ATOMIC ``promote_channel`` flow
+    (old production → historical, target → production/public/rated, channel
+    repoint — one transaction, all-or-nothing). The channel itself is not a
+    participant and carries no rating. Existing tournaments/HumanGames hold
+    frozen snapshots, so a promotion only affects the NEXT creation through
+    the channel.
     """
 
     __tablename__ = "engine_channels"

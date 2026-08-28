@@ -343,6 +343,7 @@ def test_ratings_catalog_rendered_once_in_content(app_client, settings,
             session, version_id="ce-test-20260811",
             display_name="Test Version", build_id=build.build_id,
             status="production",
+            public_visible=True, rating_enabled=True,
         )
     r = app_client.get("/chessarena/ratings/")
     assert r.status_code == 200
