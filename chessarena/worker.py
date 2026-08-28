@@ -68,9 +68,13 @@ def _service_human_move(settings: Settings, session_factory) -> bool:
     try:
         with session_factory() as session:
             game = human_engine.next_pending_game(session)
-            if game is None:
-                return False
-            game_id = game.id
+            game_id = game.id if game else None
+            # Persist any in-place stale cleanup performed while scanning:
+            # a plain Session close rolls back, which would leave the row
+            # ACTIVE+pending forever (re-scanned every tick, never expired).
+            session.commit()
+        if game_id is None:
+            return False
         with session_factory() as session:
             game = session.get(HumanGame, game_id)
             if game is None:

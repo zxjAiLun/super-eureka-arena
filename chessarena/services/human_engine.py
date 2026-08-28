@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import chess
+from sqlalchemy import case, or_, update
 
 from ..models import HumanGame, HumanGameMove, utcnow
 from .human_game import game_is_stale
@@ -184,7 +185,13 @@ def ask_engine_move(snapshot: dict, moves_uci: list[str],
 def next_pending_game(session) -> HumanGame | None:
     """The oldest ACTIVE game with a pending engine move (FIFO), skipping
     rows already past TTL/idle — an expired game must never spawn an engine
-    even before its owning browser triggers lazy expiry."""
+    even before its owning browser triggers lazy expiry.
+
+    Stale rows encountered while scanning are expired IN PLACE, but this
+    function never commits: the CALLER must commit (or roll back with the
+    rest of its transaction) so the expiry actually persists.  A plain
+    Session close silently rolls back, which would re-scan the same dead
+    row on every worker tick."""
     rows = (
         session.query(HumanGame)
         .filter(
@@ -228,17 +235,23 @@ def _moves_uci(session, game: HumanGame) -> list[str]:
     return [r.uci for r in rows]
 
 
-def _fail_game(session, game_id: str, reason: str) -> None:
-    """Mark a game ENGINE_FAILED via conditional update (never resurrects a
-    row that already left ACTIVE, e.g. via resign/expiry while the engine
-    was thinking)."""
-    from sqlalchemy import update
+def _fail_game(session, game_id: str, expected_revision: int,
+               reason: str) -> bool:
+    """Mark a game ENGINE_FAILED via the SAME ownership CAS as the success
+    path (status=ACTIVE, engine_pending=true, revision=expected).
 
+    Without the pending+revision conditions a late failure from a worker
+    that lost the race would kill a healthy game that another writer
+    already advanced (or the human already replied to).  Returns True only
+    when this call still owned the row (rowcount == 1).
+    """
     stmt = (
         update(HumanGame)
         .where(
             HumanGame.id == game_id,
             HumanGame.status == "ACTIVE",
+            HumanGame.engine_pending.is_(True),
+            HumanGame.revision == expected_revision,
         )
         .values(
             status="ENGINE_FAILED",
@@ -247,8 +260,53 @@ def _fail_game(session, game_id: str, reason: str) -> None:
             engine_pending=False,
         )
     )
-    session.execute(stmt)
+    result = session.execute(
+        stmt, execution_options={"synchronize_session": False}
+    )
     session.commit()
+    session.expire_all()
+    return result.rowcount == 1
+
+
+def _expire_if_stale_owner(session, game_id: str,
+                           expected_revision: int) -> bool:
+    """Terminalize a row whose deadline passed mid-search.
+
+    Conditional on the SAME ownership token (ACTIVE + pending +
+    expected_revision) plus ``deadline <= now`` — so it can never touch a
+    row another writer already advanced, resigned or expired.  Chooses
+    ttl_expired vs idle_expired from which deadline actually lapsed.
+    Returns True when the row was expired here.
+    """
+    now = utcnow()
+    stmt = (
+        update(HumanGame)
+        .where(
+            HumanGame.id == game_id,
+            HumanGame.status == "ACTIVE",
+            HumanGame.engine_pending.is_(True),
+            HumanGame.revision == expected_revision,
+            or_(
+                HumanGame.expires_at <= now,
+                HumanGame.idle_expires_at <= now,
+            ),
+        )
+        .values(
+            status="EXPIRED",
+            termination=case(
+                (HumanGame.expires_at <= now, "ttl_expired"),
+                else_="idle_expired",
+            ),
+            result=None,
+            engine_pending=False,
+        )
+    )
+    result = session.execute(
+        stmt, execution_options={"synchronize_session": False}
+    )
+    session.commit()
+    session.expire_all()
+    return result.rowcount == 1
 
 
 def service_pending_move(settings, session, game: HumanGame) -> str:
@@ -290,7 +348,7 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
             # Should be impossible (every stored move was validated on
             # accept); fail the game rather than spawn an engine on a
             # corrupt history.
-            _fail_game(session, game_id, "corrupt history")
+            _fail_game(session, game_id, expected_revision, "corrupt history")
             return f"human-move failed: corrupt history ({exc})"
 
     if board.is_game_over():
@@ -305,7 +363,14 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
             snapshot, moves, settings.human_play_movetime_ms
         )
     except EngineReplyError as exc:
-        _fail_game(session, game_id, str(exc))
+        if not _fail_game(session, game_id, expected_revision, str(exc)):
+            # Another writer already advanced this game (duplicate
+            # servicing, a resign, or a successful bestmove landed while
+            # we were searching); their transition stands.
+            session.rollback()
+            return (
+                "human-move skipped (state changed while engine was thinking)"
+            )
         return f"human-move engine failed: {exc}"
 
     # P2-3 repair: a malformed bestmove (e.g. "bestmove garbage") must
@@ -314,12 +379,26 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
     try:
         move = chess.Move.from_uci(best_uci)
     except ValueError:
-        _fail_game(session, game_id, f"malformed bestmove: {best_uci!r}")
+        if not _fail_game(
+            session, game_id, expected_revision,
+            f"malformed bestmove: {best_uci!r}",
+        ):
+            session.rollback()
+            return (
+                "human-move skipped (state changed while engine was thinking)"
+            )
         return f"human-move engine failed: malformed bestmove {best_uci!r}"
     if move not in board.legal_moves:
         # A frozen engine replying outside the rules is treated as an engine
         # failure, never silently substituted.
-        _fail_game(session, game_id, f"illegal bestmove: {best_uci}")
+        if not _fail_game(
+            session, game_id, expected_revision,
+            f"illegal bestmove: {best_uci}",
+        ):
+            session.rollback()
+            return (
+                "human-move skipped (state changed while engine was thinking)"
+            )
         return "human-move engine failed: illegal bestmove"
 
     san = board.san(move)
@@ -327,16 +406,20 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
     ply = len(moves) + 1
     fen_after = board.fen()
     outcome = board.outcome()
-    now = utcnow()
 
     # --- CAS: only the writer that still owns the pre-search state wins.
-    from sqlalchemy import update
+    # The deadline columns are part of the ownership token: a bestmove that
+    # crosses the idle/TTL deadline mid-search (movetime <= 3s window) must
+    # NOT land and re-arm idle_expires_at, resurrecting a dead game.
+    now = utcnow()
 
     cas = update(HumanGame).where(
         HumanGame.id == game_id,
         HumanGame.status == "ACTIVE",
         HumanGame.engine_pending.is_(True),
         HumanGame.revision == expected_revision,
+        HumanGame.expires_at > now,
+        HumanGame.idle_expires_at > now,
     )
     if outcome is not None:
         new_status = "FINISHED"
@@ -361,12 +444,17 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
             status=new_status,
             result=new_result,
             termination=new_termination,
-        )
+        ),
+        execution_options={"synchronize_session": False},
     )
     if result.rowcount != 1:
-        # Lost the race (resign / expiry / duplicate servicing).  Discard
-        # the late bestmove entirely.
+        # Lost the race (resign / duplicate servicing / a deadline that
+        # passed while the engine was thinking).  Discard the late
+        # bestmove entirely; if the only reason we lost is that the game
+        # went stale mid-search, terminalize it as EXPIRED here rather
+        # than leaving a dead ACTIVE+pending row behind.
         session.rollback()
+        _expire_if_stale_owner(session, game_id, expected_revision)
         return (
             "human-move skipped (state changed while engine was thinking)"
         )
@@ -383,6 +471,7 @@ def service_pending_move(settings, session, game: HumanGame) -> str:
         )
     )
     session.commit()
+    session.expire_all()
     return (
         f"human-move played: game={game_id} ply={ply} uci={best_uci}"
     )

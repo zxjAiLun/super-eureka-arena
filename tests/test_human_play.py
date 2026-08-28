@@ -1332,3 +1332,159 @@ def test_malformed_bestmove_terminalizes_not_hotloop(
         assert game.engine_pending is False
         # The dead game is never picked up again.
         assert human_engine.next_pending_game(session) is None
+
+
+# ---------------------------------------------------------------------------
+# H7: CAS / expiry closure
+# ---------------------------------------------------------------------------
+def test_late_engine_failure_does_not_kill_won_race(
+    hp_settings, engine_factory, hp_registered
+):
+    """H7 P1: success-vs-late-failure.  Worker A's bestmove lands first
+    (revision 1 -> 2, pending cleared); worker B's engine then FAILS on the
+    same stale view.  B's ENGINE_FAILED write must lose the ownership CAS —
+    the healthy game stays ACTIVE with the engine move intact."""
+    def failing_ask_after_success(snapshot, moves, movetime_ms):
+        # While "searching", a second writer completes this same engine
+        # reply via the SUCCESS CAS (exactly what a duplicate worker that
+        # won the race would leave behind).  The monkeypatch is restored
+        # first so the nested service runs the real code path.
+        orig = human_engine.ask_engine_move
+        human_engine.ask_engine_move = lambda s, m, t: ("g8f6", 40)
+        try:
+            with engine_factory() as other:
+                human_engine.service_pending_move(
+                    hp_settings, other, other.get(HumanGame, gid)
+                )
+        finally:
+            human_engine.ask_engine_move = orig
+        raise human_engine.EngineReplyError("engine exploded mid-search")
+
+    with engine_factory() as session:
+        game, token = human_game.create_game(
+            session, hp_settings, _FakeRequest(),
+            "preset:stockfish-limited-1800", "white",
+        )
+        gid = game.id
+        human_game.submit_human_move(
+            session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
+        )
+
+    orig = human_engine.ask_engine_move
+    human_engine.ask_engine_move = failing_ask_after_success
+    try:
+        with engine_factory() as session:
+            action = human_engine.service_pending_move(
+                hp_settings, session, session.get(HumanGame, gid)
+            )
+            assert "state changed while engine was thinking" in action, action
+    finally:
+        human_engine.ask_engine_move = orig
+
+    with engine_factory() as session:
+        game = session.get(HumanGame, gid)
+        # The successful writer's state stands; the late failure is inert.
+        assert game.status == "ACTIVE"
+        assert game.revision == 2
+        assert game.engine_pending is False
+        assert game.termination is None
+        moves = (
+            session.query(HumanGameMove)
+            .filter(HumanGameMove.human_game_id == gid)
+            .order_by(HumanGameMove.ply)
+            .all()
+        )
+        assert [m.side for m in moves] == ["human", "engine"]
+
+
+def test_stale_pending_expiry_persists_across_session_close(
+    hp_settings, engine_factory, hp_registered
+):
+    """H7 P2-1: the worker's next_pending_game scan expires stale pending
+    rows IN PLACE; that expiry must actually reach the database — a plain
+    session close (no commit) would roll it back and re-scan the same dead
+    row on every tick."""
+    from chessarena.worker import _service_human_move
+
+    with engine_factory() as session:
+        game, token = human_game.create_game(
+            session, hp_settings, _FakeRequest(),
+            "preset:stockfish-limited-1800", "white",
+        )
+        gid = game.id
+        human_game.submit_human_move(
+            session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
+        )
+        session.expire_all()
+        game = session.get(HumanGame, gid)
+        game.idle_expires_at = utcnow() - timedelta(seconds=1)
+        session.commit()
+
+    # The full worker path: scan (with commit) -> no engine spawned.
+    serviced = _service_human_move(hp_settings, engine_factory)
+    assert serviced is False
+
+    # A brand-new session must see the persisted expiry, not the pre-scan
+    # ACTIVE+pending row that a rolled-back close would leave behind.
+    with engine_factory() as session:
+        game = session.get(HumanGame, gid)
+        assert game.status == "EXPIRED"
+        assert game.engine_pending is False
+        assert game.termination == "idle_expired"
+    # And the dead row never comes back as pending work.
+    with engine_factory() as session:
+        assert human_engine.next_pending_game(session) is None
+
+
+def test_expiry_during_engine_search_discards_bestmove(
+    hp_settings, engine_factory, hp_registered
+):
+    """H7 P2-2: the game is healthy when the search starts, but its idle
+    deadline passes while the engine is thinking.  The late bestmove must
+    NOT land (that would re-arm idle_expires_at and resurrect a dead game);
+    the row terminalizes as EXPIRED instead."""
+    def slow_ask(snapshot, moves, movetime_ms):
+        # Mid-search: the idle deadline lapses (e.g. it was set 0 seconds
+        # into the future, or a long movetime crossed it).
+        with engine_factory() as other:
+            other.expire_all()
+            row = other.get(HumanGame, gid)
+            row.idle_expires_at = utcnow() - timedelta(seconds=1)
+            other.commit()
+        return "g8f6", 900
+
+    with engine_factory() as session:
+        game, token = human_game.create_game(
+            session, hp_settings, _FakeRequest(),
+            "preset:stockfish-limited-1800", "white",
+        )
+        gid = game.id
+        human_game.submit_human_move(
+            session, hp_settings, session.get(HumanGame, gid), "e2e4", 0
+        )
+
+    orig = human_engine.ask_engine_move
+    human_engine.ask_engine_move = slow_ask
+    try:
+        with engine_factory() as session:
+            action = human_engine.service_pending_move(
+                hp_settings, session, session.get(HumanGame, gid)
+            )
+            assert "state changed while engine was thinking" in action, action
+    finally:
+        human_engine.ask_engine_move = orig
+
+    with engine_factory() as session:
+        game = session.get(HumanGame, gid)
+        # The late bestmove was discarded and the expired row terminalized.
+        assert game.status == "EXPIRED"
+        assert game.termination == "idle_expired"
+        assert game.engine_pending is False
+        assert game.revision == 1  # unchanged: only the human move counted
+        moves = (
+            session.query(HumanGameMove)
+            .filter(HumanGameMove.human_game_id == gid)
+            .order_by(HumanGameMove.ply)
+            .all()
+        )
+        assert [m.side for m in moves] == ["human"]  # no engine move
