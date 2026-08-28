@@ -54,6 +54,7 @@ from ..models import (
 )
 from ..schemas import (
     EventOut,
+    ExperimentConfig,
     GameOut,
     PairJobOut,
     TournamentCreate,
@@ -505,6 +506,28 @@ def create_tournament(
             body.opening_exclude_fens or []
         )
 
+    if body.experiment is not None:
+        # V2.2-A: freeze the experiment envelope. The candidate/baseline
+        # launch configs are NOT duplicated — they are already frozen in
+        # engine_a/engine_b; this envelope only records the experiment
+        # GROUP identity, purpose, stage and the decision rule. A is
+        # ALWAYS the candidate and B the baseline (the statistics fields
+        # and the worker's candidate-perspective already mean exactly
+        # that); the mapping is fixed by the server, not user input.
+        config_snapshot["experiment"] = {
+            "schema_version": 1,
+            "experiment_id": body.experiment.experiment_id,
+            "purpose": body.experiment.purpose,
+            "stage": body.experiment.stage,
+            "candidate_side": "engine_a",
+            "baseline_side": "engine_b",
+            "decision_rule": (
+                "sprt"
+                if (body.sprt is not None and body.sprt.enabled)
+                else "fixed_pairs"
+            ),
+        }
+
     tournament = Tournament(
         name=body.name,
         status=DRAFT,
@@ -940,6 +963,12 @@ def _new_match_defaults(session, settings, query: dict) -> dict:
         "pairs": query.get("pairs") or prefs.get("pairs") or "10",
         "engine_a_elo": query.get("engine_a_elo") or "",
         "engine_b_elo": query.get("engine_b_elo") or "",
+        # V2.2-A: run-again carries the frozen experiment envelope as
+        # query params; never persisted into the last-used prefs.
+        "experiment_enabled": query.get("experiment_enabled") == "on",
+        "experiment_id": query.get("experiment_id") or "",
+        "experiment_stage": query.get("experiment_stage") or "",
+        "experiment_purpose": query.get("experiment_purpose") or "",
     }
 
 
@@ -1022,6 +1051,26 @@ def _parse_admin_side(form: dict, side: str) -> dict:
 async def admin_tournament_create(request: Request, session: Session = Depends(get_db)):
     form = dict(await request.form())
     validate_csrf_token(request, form)
+    # V2.2-A: the optional Experiment Context is all-or-nothing — when the
+    # checkbox is on, all three fields are required; when off, nothing is
+    # sent (no half-filled envelopes).
+    experiment = None
+    if form.get("experiment_enabled") == "on":
+        try:
+            experiment = ExperimentConfig(
+                experiment_id=(form.get("experiment_id") or "").strip(),
+                purpose=(form.get("experiment_purpose") or "").strip(),
+                stage=form.get("experiment_stage") or "",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "experiment context is enabled: experiment_id, "
+                    "purpose and stage are all required (valid slug id, "
+                    "valid stage): " + str(exc).splitlines()[0]
+                ),
+            ) from exc
     body = TournamentCreate(
         name=form["name"],
         engine_a=_parse_admin_side(form, "a"),
@@ -1041,6 +1090,7 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
             else None
         ),
         arena_elo_enabled=form.get("arena_elo_enabled") == "on",
+        experiment=experiment,
     )
     # Reuse the API creation logic by calling it directly.
     created = create_tournament(body, session, request.app.state.settings)
@@ -1061,6 +1111,38 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
     return RedirectResponse(
         url=f"{request.app.state.settings.base_path}/admin/tournaments/{created['id']}",
         status_code=303,
+    )
+
+
+@admin_router.get(
+    "/admin/tournaments/{tournament_id}/experiment-status",
+    response_class=HTMLResponse,
+)
+def admin_tournament_experiment_status(
+    request: Request, tournament_id: str, session: Session = Depends(get_db)
+):
+    """V2.2-A: live experiment card fragment (pure read, zero mutation).
+
+    Polled by the tournament detail page every few seconds so pairs, ptnml,
+    LLR and the decision update without a full page reload.
+    """
+    templates = request.app.state.templates
+    tournament = _get_tournament_or_404(session, tournament_id)
+    from ..services.experiments import experiment_view, side_display_name
+
+    experiment = experiment_view(tournament)
+    if experiment is not None:
+        experiment["candidate_label"] = side_display_name(
+            experiment["candidate"])
+        experiment["baseline_label"] = side_display_name(
+            experiment["baseline"])
+    return templates.TemplateResponse(
+        request,
+        "_experiment_status.html",
+        {
+            "experiment": experiment,
+            "settings": request.app.state.settings,
+        },
     )
 
 
@@ -1139,8 +1221,31 @@ def admin_tournament_detail(
         custom_elo = (snap.get(side) or {}).get("custom_elo")
         if custom_elo is not None:
             run_again += f"&{side}_elo={custom_elo}"
+    # V2.2-A: run-again preserves the experiment envelope so a follow-up
+    # run of the same experiment group starts from the same context.
+    env = snap.get("experiment") or {}
+    if env.get("experiment_id"):
+        from urllib.parse import quote
+
+        run_again += (
+            f"&experiment_enabled=on"
+            f"&experiment_id={quote(str(env.get('experiment_id')))}"
+            f"&experiment_stage={quote(str(env.get('stage')))}"
+            f"&experiment_purpose={quote(str(env.get('purpose')))}"
+        )
 
     from ..services.analysis import analysis_state
+
+    # V2.2-A: the experiment view (None for legacy matches without an
+    # envelope — the panel is simply not rendered).
+    from ..services.experiments import experiment_view, side_display_name
+
+    experiment = experiment_view(tournament)
+    if experiment is not None:
+        experiment["candidate_label"] = side_display_name(
+            experiment["candidate"])
+        experiment["baseline_label"] = side_display_name(
+            experiment["baseline"])
 
     game_analysis = {g.id: analysis_state(g) for g in games}
 
@@ -1178,6 +1283,8 @@ def admin_tournament_detail(
             "engine_a_label": engine_a_label,
             "engine_b_label": engine_b_label,
             "game_analysis": game_analysis,
+            "experiment": experiment,
+            "tournament_id": tournament.id,
             "rated_elo": rated_elo,
             "decisive_count": bulk_pending["decisive"],
             "losses_count": bulk_pending["losses"],

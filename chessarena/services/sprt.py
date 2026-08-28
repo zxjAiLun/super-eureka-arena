@@ -163,3 +163,61 @@ def sprt_llr_and_decision(
         "upper_bound": upper,
         "decision": decision,
     }
+
+
+# ---------------------------------------------------------------------------
+# V2.2-A: shared SPRT read model (single source for worker + UI)
+# ---------------------------------------------------------------------------
+def pentanomial_from_pairs(pair_jobs) -> list[int]:
+    """Pentanomial counts over the VERIFIED COMPLETED pair jobs.
+
+    The single implementation the scheduler's SPRT check and the admin UI
+    both use — the two can never drift. Pair classification goes through
+    ``pair_points_index`` on each pair's frozen
+    ``verification.candidate_perspective``.
+    """
+    from ..models import COMPLETED
+
+    ptnml = [0] * PTNML_SIZE
+    for pair_job in pair_jobs:
+        if pair_job.status != COMPLETED:
+            continue
+        verification = pair_job.verification or {}
+        computed = verification.get("candidate_perspective") or {}
+        ptnml[pair_points_index(
+            int(computed.get("wins", 0)),
+            int(computed.get("losses", 0)),
+            int(computed.get("draws", 0)),
+        )] += 1
+    return ptnml
+
+
+def tournament_sprt_state(tournament) -> dict | None:
+    """The live SPRT state of a tournament, or None when its frozen
+    snapshot carries no enabled SPRT contract.
+
+    Wraps the one math implementation (``sprt_llr_and_decision``) with the
+    frozen contract parameters, so the worker decision, the admin UI and
+    the artifact evidence are all computed by the same code path.
+    """
+    snap = tournament.config_snapshot or {}
+    cfg = snap.get("sprt")
+    if not cfg or not cfg.get("enabled"):
+        return None
+    ptnml = pentanomial_from_pairs(tournament.pair_jobs)
+    result = sprt_llr_and_decision(
+        elo0=float(cfg["elo0"]),
+        elo1=float(cfg["elo1"]),
+        alpha=float(cfg["alpha"]),
+        beta=float(cfg["beta"]),
+        ptnml=ptnml,
+        max_pairs=int(cfg["max_pairs"]),
+    )
+    return {
+        **result,
+        "elo0": cfg.get("elo0"),
+        "elo1": cfg.get("elo1"),
+        "alpha": cfg.get("alpha"),
+        "beta": cfg.get("beta"),
+        "max_pairs": cfg.get("max_pairs"),
+    }

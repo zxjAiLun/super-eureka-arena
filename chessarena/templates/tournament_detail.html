@@ -9,6 +9,14 @@
   {% include "_tournament_status.html" %}
 </div>
 
+{% if experiment %}
+<div id="experiment-fragment">
+  {% with tournament_id = tournament.id %}
+    {% include "_experiment_status.html" %}
+  {% endwith %}
+</div>
+{% endif %}
+
 {% if result_terminal %}
 <section class="panel result-summary">
   <h3>Result</h3>

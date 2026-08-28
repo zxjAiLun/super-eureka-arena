@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -130,6 +130,31 @@ class EngineChannelOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ExperimentConfig(BaseModel):
+    """V2.2-A: the experiment envelope frozen into a tournament's
+    config_snapshot. Organizes EXISTING information — it never duplicates
+    the candidate/baseline launch configs (those live in
+    config_snapshot.engine_a / engine_b, already frozen).
+
+    Contract: Engine A is ALWAYS the candidate and Engine B the baseline
+    (that is how candidate_wins / candidate_losses / Δ Elo (A−B) and the
+    worker's candidate-perspective verification already interpret every
+    match); this envelope makes the implicit contract explicit. Users
+    cannot flip the mapping.
+    """
+
+    # Slug identity of the experiment GROUP across multiple runs
+    # (e.g. s9-c1-development-space). Never the tournament UUID.
+    experiment_id: str = Field(
+        min_length=1, max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$",
+    )
+    purpose: str = Field(min_length=1, max_length=2000)
+    stage: Literal[
+        "screening", "confirmation", "promotion", "benchmark"
+    ]
+
+
 class TournamentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     engine_a: EngineRef
@@ -145,6 +170,8 @@ class TournamentCreate(BaseModel):
     opening_seed: Optional[int] = Field(default=None, ge=0)
     # S4.3D: optional frozen SPRT contract (formal promotion test).
     sprt: Optional[SprtConfig] = None
+    # V2.2-A: optional experiment envelope (frozen into config_snapshot).
+    experiment: Optional[ExperimentConfig] = None
     # S4.3D: normalized starting FENs to exclude from the opening sample
     # (prior tournaments must not leak into the formal test).
     opening_exclude_fens: Optional[list[str]] = None

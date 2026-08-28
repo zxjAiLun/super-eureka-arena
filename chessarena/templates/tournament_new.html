@@ -9,7 +9,7 @@
     <input type="text" name="name" required maxlength="200" placeholder="Production vs Stockfish Limited 2000">
   </label>
 
-  <h3>Engine A</h3>
+  <h3>Candidate — Engine A</h3>
   <label>Side
     <select name="engine_a_side" required>
       <optgroup label="EngineVersions (stable rated identity)">
@@ -36,7 +36,12 @@
     <span class="muted" id="elo-a-range"></span>
   </label>
 
-  <h3>Engine B</h3>
+  <p class="muted">
+    Statistics (candidate wins/losses, Δ Elo A−B) are recorded from the
+    candidate perspective.
+  </p>
+
+  <h3>Baseline — Engine B</h3>
   <label>Side
     <select name="engine_b_side" required>
       <optgroup label="EngineVersions (stable rated identity)">
@@ -70,6 +75,42 @@
     <input type="checkbox" name="allow_intentional_self_play">
     Allow intentional self-play
   </label>
+
+  <h3>Experiment context <span class="muted">(optional)</span></h3>
+  <label>
+    <input type="checkbox" name="experiment_enabled" id="experiment-enabled"
+           {% if defaults.experiment_enabled %}checked{% endif %}>
+    Track this match as an experiment
+  </label>
+  <div id="experiment-fields" style="display:none">
+    <label>Experiment ID <span class="muted">— slug, stable across runs of the same experiment</span>
+      <input type="text" name="experiment_id" maxlength="100"
+             pattern="[a-z0-9][a-z0-9._-]{0,99}"
+             value="{{ defaults.experiment_id or '' }}"
+             placeholder="s9-c1-development-space">
+    </label>
+    <label>Stage
+      <select name="experiment_stage">
+        <option value="screening" {% if defaults.experiment_stage == 'screening' %}selected{% endif %}>
+          screening — fast filter / LOO / exploratory</option>
+        <option value="confirmation" {% if defaults.experiment_stage == 'confirmation' %}selected{% endif %}>
+          confirmation — high-confidence validation of a screened direction</option>
+        <option value="promotion" {% if defaults.experiment_stage == 'promotion' %}selected{% endif %}>
+          promotion — final gate before production</option>
+        <option value="benchmark" {% if defaults.experiment_stage == 'benchmark' %}selected{% endif %}>
+          benchmark — pure measurement, no accept/reject semantics</option>
+      </select>
+    </label>
+    <label>Purpose
+      <textarea name="experiment_purpose" rows="3" maxlength="2000"
+                placeholder="Confirm whether removing Development/Space improves CurrentFinal by enough Elo to justify an HCE change.">{{ defaults.experiment_purpose or '' }}</textarea>
+    </label>
+    <p class="muted">
+      When enabled, all three fields are required. The experiment context is
+      frozen into the match snapshot; candidate/baseline identities are
+      always the frozen Engine A / Engine B snapshots.
+    </p>
+  </div>
 
   <h3>Configuration</h3>
   <label>Opening set
@@ -159,6 +200,24 @@
   }
   a.addEventListener('change', refresh);
   b.addEventListener('change', refresh);
+  refresh();
+})();
+</script>
+
+<script>
+// V2.2-A: Experiment Context is all-or-nothing — the three fields show
+// only when the checkbox is on, and are required only then.
+(function () {
+  var box = document.getElementById('experiment-enabled');
+  var fields = document.getElementById('experiment-fields');
+  if (!box || !fields) return;
+  function refresh() {
+    fields.style.display = box.checked ? '' : 'none';
+    fields.querySelectorAll('input[name=experiment_id], ' +
+                            'textarea[name=experiment_purpose]')
+      .forEach(function (el) { el.required = box.checked; });
+  }
+  box.addEventListener('change', refresh);
   refresh();
 })();
 </script>
