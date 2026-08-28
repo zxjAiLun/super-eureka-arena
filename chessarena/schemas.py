@@ -155,6 +155,49 @@ class ExperimentConfig(BaseModel):
     ]
 
 
+class FormalExperimentDraft(BaseModel):
+    """V2.2-B: the wizard's input draft for a FORMAL experiment.
+
+    Only confirmation / promotion stages exist here — screening and
+    benchmark keep using the plain New Match form. There is deliberately
+    NO baseline field: the baseline is ALWAYS resolved server-side from
+    channel:current-final. Statistical model fields (unit/model/
+    elo_model) are fixed; only the hypothesis parameters are input.
+    """
+
+    experiment_id: str = Field(
+        min_length=1, max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$",
+    )
+    purpose: str = Field(min_length=1, max_length=2000)
+    stage: Literal["confirmation", "promotion"]
+
+    # Candidate: "preset:<id>" or "version:<id>" (never a baseline).
+    candidate: str = Field(min_length=3, max_length=200)
+
+    # SPRT hypothesis parameters (the model itself is fixed).
+    elo0: float = Field(default=0.0)
+    elo1: float = Field(default=10.0)
+    alpha: float = Field(default=0.05, gt=0.0, lt=0.5)
+    beta: float = Field(default=0.05, gt=0.0, lt=0.5)
+    max_pairs: int = Field(default=1000, ge=1)
+
+    # Opening independence: prior tournaments to exclude (in addition to
+    # the automatic same-experiment discovery).
+    explicit_prior_tournament_ids: list[str] = Field(default_factory=list)
+
+    # Empty => the server generates one at PREVIEW time and it is frozen
+    # into the plan digest (preview sample == created sample).
+    opening_seed: Optional[int] = Field(default=None, ge=0)
+    opening_set_id: str = Field(min_length=1)
+    opening_plies: Optional[int] = Field(default=None, ge=1)
+
+    # The plan digest from the preview this create confirms. Required on
+    # create; the server recomputes everything and compares.
+    plan_digest: Optional[str] = Field(default=None, min_length=64,
+                                       max_length=64)
+
+
 class TournamentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     engine_a: EngineRef

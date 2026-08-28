@@ -156,3 +156,80 @@ def select_opening_indices(
             f"(requested {plies} plies); need {count}"
         )
     return random.Random(seed).sample(pool, count)
+
+
+def opening_fens_for_indices(
+    opening_set, indices: list[int], plies: int | None = None
+) -> list[str]:
+    """Canonical starting FENs for the given indices, in ONE pass.
+
+    Used by the formal-experiment planner to rebuild a prior run's frozen
+    opening sample from its snapshot (opening_set_id + indices + plies).
+    The caller is responsible for verifying file/snapshot identity first
+    (``verify_opening_file_identity``); this helper only resolves FENs.
+    """
+    fmt = _format(opening_set)
+    wanted = sorted(set(indices))
+    out: dict[int, str] = {}
+    if fmt == "pgn":
+        if plies is None:
+            raise CutechessLaunchError("plies required for PGN opening sets")
+        remaining = set(wanted)
+        for i, game in enumerate(_iter_games(Path(opening_set.file_path))):
+            if not remaining:
+                break
+            if i in remaining:
+                out[i] = _game_fen(game, plies)
+                remaining.discard(i)
+        missing = remaining - set(out)
+        if missing:
+            raise CutechessLaunchError(
+                f"opening indices out of range: {sorted(missing)[:5]}"
+            )
+    else:
+        lines = [
+            ln.strip()
+            for ln in Path(opening_set.file_path).read_text(
+                encoding="utf-8").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        for i in wanted:
+            if i >= len(lines):
+                raise CutechessLaunchError(
+                    f"opening_index {i} out of range ({len(lines)} lines)"
+                )
+            out[i] = chess.Board(lines[i].split(";")[0].strip()).fen()
+    return [out[i] for i in indices]
+
+
+def verify_prior_opening_snapshot(
+    opening_set, snapshot_opening: dict
+) -> None:
+    """Fail-closed identity check for a prior run used as an exclusion
+    source: the frozen snapshot must carry an opening identity, the
+    registry row must exist and match the snapshot SHA, and the ACTUAL
+    file on disk must still hash to the same SHA."""
+    from .cutechess import CutechessLaunchError
+
+    if not snapshot_opening or not snapshot_opening.get("sha256"):
+        raise CutechessLaunchError(
+            "prior run snapshot lacks a frozen opening sha256"
+        )
+    if snapshot_opening.get("opening_set_id") != opening_set.opening_set_id:
+        raise CutechessLaunchError(
+            "prior run snapshot opening_set_id does not match the registry"
+        )
+    if opening_set.sha256 and \
+            snapshot_opening["sha256"] != opening_set.sha256:
+        raise CutechessLaunchError(
+            "prior run snapshot opening sha256 does not match the "
+            "registered OpeningSet (registry changed since the run)"
+        )
+    path = Path(opening_set.file_path)
+    if not path.is_file():
+        raise CutechessLaunchError(f"opening set file missing: {path}")
+    actual = sha256_file(path)
+    if actual != snapshot_opening["sha256"]:
+        raise CutechessLaunchError(
+            "opening file on disk does not match the prior run snapshot"
+        )
