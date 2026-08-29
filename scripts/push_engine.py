@@ -51,6 +51,32 @@ def run(argv: list[str]) -> None:
     subprocess.run(argv, check=True)
 
 
+def preset_args_for_remote(command_args: list[str]) -> list[str]:
+    """Translate a preset's command_args into register_candidate_preset.py
+    CLI arguments.
+
+    A leading ``--profile <name>`` pair (the historical shape produced by the
+    old ``--profile`` shortcut) is forwarded as the script's ``--profile``
+    shortcut; every remaining token becomes one ``--command-arg=<token>``
+    flag.  This never relies on argparse accepting a bare leading-dash token
+    as a positional, which is what made the previous inline expansion
+    silently wrong for anything beyond a single profile pair.
+    """
+    if not command_args:
+        return []
+
+    out: list[str] = []
+
+    if len(command_args) >= 2 and command_args[0] == "--profile":
+        out += ["--profile", command_args[1]]
+        command_args = command_args[2:]
+
+    for arg in command_args:
+        out.append(f"--command-arg={arg}")
+
+    return out
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -68,6 +94,7 @@ def main() -> int:
     sha = sha256_file(binary)
     build_id = args.name
     build_dir = f"{BUILDS_DIR}/{build_id}"
+    preset_argv = preset_args_for_remote(args.command_args)
 
     # 1. Upload the binary to a staging path on the server.
     run(["scp", str(binary), f"{args.host}:/tmp/engine-push-{build_id}"])
@@ -99,7 +126,7 @@ def main() -> int:
                     f"--preset-id {shlex.quote(build_id)}",
                     f"--display-name {shlex.quote(build_id)}",
                 ]
-                + [f"--command-args {shlex.quote(a)}" for a in args.command_args]
+                + preset_argv
                 + [f"--uci-option {shlex.quote(o)}" for o in args.uci_option]
             ),
         ]

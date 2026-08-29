@@ -3,12 +3,12 @@
 (P4.4 F1).  Idempotent: an existing preset_id is updated in place.
 
 The preset is "bare" by default (no command_args, empty uci_options) so it is
-immediately selectable in the New Match dropdown.  Use ``--command-args`` /
+immediately selectable in the New Match dropdown.  Use ``--command-arg`` /
 ``--uci-option`` to pin engine-specific configuration.
 
 Usage:
     python scripts/register_candidate_preset.py --build-id <id> --preset-id <id> \
-        --display-name <name> [--command-args ARG ...] [--uci-option Name=value ...]
+        --display-name <name> [--command-arg ARG ...] [--uci-option Name=value ...]
 """
 
 from __future__ import annotations
@@ -24,6 +24,26 @@ from chessarena.db import make_engine, make_session_factory  # noqa: E402
 from chessarena.models import EngineBuild, EnginePreset  # noqa: E402
 
 
+def resolve_command_args(args) -> list[str]:
+    """Compose the preset's command_args from the CLI surface.
+
+    ``--profile`` is a shortcut for a leading ``["--profile", name]`` pair and
+    must not be combined with an explicit ``--profile`` token; everything from
+    ``--command-arg`` / legacy ``--command-args`` is appended verbatim, one
+    token per element, with no shell joining or splitting.
+    """
+    extra = list(args.command_args) + list(args.command_arg)
+
+    if args.profile:
+        if "--profile" in extra:
+            raise SystemExit(
+                "error: --profile must not also appear in --command-arg"
+            )
+        return ["--profile", args.profile, *extra]
+
+    return extra
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-id", required=True)
@@ -31,15 +51,20 @@ def main() -> int:
     parser.add_argument("--display-name", required=True)
     parser.add_argument("--command-args", nargs="+", default=[])
     parser.add_argument(
+        "--command-arg",
+        action="append",
+        default=[],
+        help="single startup token; repeat for each token in order "
+        "(leading-dash safe, unlike --command-args)",
+    )
+    parser.add_argument(
         "--profile",
-        help="shortcut for --command-args --profile <name> (project engines)",
+        help="shortcut for a leading --profile <name> pair (project engines)",
     )
     parser.add_argument("--uci-option", action="append", default=[])
     args = parser.parse_args()
 
-    command_args = list(args.command_args)
-    if args.profile:
-        command_args = ["--profile", args.profile]
+    command_args = resolve_command_args(args)
 
     uci_options: dict = {}
     for spec in args.uci_option:
