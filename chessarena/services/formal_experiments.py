@@ -95,6 +95,14 @@ def _resolve_candidate(session, candidate_ref: str) -> tuple[dict, list]:
             return {}, [f"candidate preset build disabled: {preset.build_id}"]
         args = list(preset.command_args or [])
         opts = dict(preset.uci_options or {})
+        # S10-D0: a candidate preset carrying --nnue-model must resolve to a
+        # declared, byte-verified model artifact (shared gate with the
+        # scheduler prelaunch and version provenance).
+        from .model_artifacts import validate_launch_artifacts
+
+        model_errors = validate_launch_artifacts(build, args)
+        if model_errors:
+            return {}, model_errors
         return {
             "kind": "preset",
             "ref": preset.preset_id,

@@ -777,6 +777,35 @@ class Scheduler:
                     f"{label}: live build git_sha differs from frozen snapshot"
                 )
 
+        # S10-D0: model artifacts get the same per-pair fail-closed pinning
+        # as the binary — frozen list vs live manifest, then the shared
+        # gate resolves --nnue-model against the declared artifacts and
+        # re-hashes the actual file bytes before Popen.
+        from ..services.model_artifacts import (
+            normalize_model_artifacts,
+            validate_launch_artifacts,
+        )
+
+        for label, cfg, build in (
+            ("engine_a", engine_a_cfg, engine_a),
+            ("engine_b", engine_b_cfg, engine_b),
+        ):
+            frozen_models = (snapshot.get(label) or {}).get("model_artifacts")
+            if frozen_models is None:
+                # Pre-D0 snapshot: no frozen list; only the shared live gate.
+                frozen_models = []
+            live_models = normalize_model_artifacts(build.manifest)
+            if frozen_models and live_models != frozen_models:
+                raise cc.CutechessLaunchError(
+                    f"{label}: live build model_artifacts differ from the "
+                    f"frozen snapshot ({build.build_id})"
+                )
+            model_errors = validate_launch_artifacts(build, cfg["command_args"])
+            if model_errors:
+                raise cc.CutechessLaunchError(
+                    f"{label}: " + "; ".join(model_errors)
+                )
+
         hash_mb = snapshot.get("hash_mb", self.settings.hash_mb)
         threads = snapshot.get("threads", self.settings.threads)
 

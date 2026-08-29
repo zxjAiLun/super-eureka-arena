@@ -319,6 +319,14 @@ def validate_version_build_provenance(
             f"binary_sha256 {version.binary_sha256} != registry "
             f"binary_sha256 {build.binary_sha256}"
         )
+    # S10-D0: a --nnue-model launch must point at a declared, byte-verified
+    # model artifact of the CURRENT build (shared gate with the scheduler's
+    # per-pair prelaunch check).
+    from .model_artifacts import validate_launch_artifacts
+
+    errors.extend(
+        validate_launch_artifacts(build, list(version.command_args or []))
+    )
     return errors
 
 

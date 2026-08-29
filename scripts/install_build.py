@@ -138,6 +138,12 @@ def main() -> int:
             f"actual {actual_sha}"
         )
 
+    # S10-D0: validate declared model artifacts (optional list) with the
+    # same fail-closed SHA contract as the binary, and make them read-only.
+    from chessarena.services.model_artifacts import validate_model_artifacts
+
+    model_artifacts = validate_model_artifacts(build_dir, manifest)
+
     if args.probe:
         probe_uci_identity(binary, manifest["uci_id_name"])
 
@@ -184,6 +190,11 @@ def main() -> int:
     print(f"registered build {manifest['build_id']} -> {binary}")
     print(f"  profiles: {manifest['supported_profiles']}")
     print(f"  binary sha256: {actual_sha}")
+    for entry in model_artifacts:
+        print(
+            f"  model {entry['model_id']}: {entry['relative_path']} "
+            f"sha256 {entry['sha256']}"
+        )
     return 0
 
 

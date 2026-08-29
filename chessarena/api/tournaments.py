@@ -415,6 +415,12 @@ def create_tournament(
             "uci_options_schema": build.uci_options_schema or {},
             "git_sha": build.git_sha,
             "binary_sha256": build.binary_sha256,
+            # S10-D0: freeze the build's declared model artifacts (empty for
+            # builds without them) so the frozen model SHA travels with the
+            # tournament even if the live manifest row is edited later.
+            "model_artifacts": list(
+                (build.manifest or {}).get("model_artifacts") or []
+            ),
             **({"custom_elo": custom_elo} if custom_elo is not None else {}),
         }
 
@@ -444,6 +450,13 @@ def create_tournament(
             "source_sha": version.source_sha,
             "binary_sha256": version.binary_sha256,
             "identity_fingerprint": version.identity_fingerprint,
+            # S10-D0: same model-artifact freeze as the preset snapshot.
+            "model_artifacts": list(
+                ((build.manifest if build else None) or {}).get(
+                    "model_artifacts"
+                )
+                or []
+            ),
         }
 
     def _snapshot_side(kind, obj, build, ref) -> dict:
