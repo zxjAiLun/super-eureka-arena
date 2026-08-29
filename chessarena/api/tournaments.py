@@ -54,8 +54,11 @@ from ..models import (
 )
 from ..schemas import (
     EventOut,
+    ExperimentConfig,
+    FormalExperimentDraft,
     GameOut,
     PairJobOut,
+    SprtConfig,
     TournamentCreate,
     TournamentDetailOut,
     TournamentOut,
@@ -292,28 +295,13 @@ def create_tournament(
     # books; seed drives reproducible sampling without replacement.
     from ..services import openings
 
-    opening_plies = body.opening_plies
+    try:
+        opening_plies = openings.resolve_opening_plies(
+            opening, body.opening_plies
+        )
+    except openings.CutechessLaunchError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     fmt = (opening.manifest or {}).get("format") or opening.format
-    if fmt == "pgn":
-        if opening_plies is None:
-            # Resolve the book/catalog default (e.g. 8moves_v3 -> 16 plies);
-            # fail at creation if there is no default — never at launch.
-            opening_plies = (opening.manifest or {}).get("default_plies")
-        if opening_plies is None:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "opening_plies required for PGN opening sets and this "
-                    "book has no default plies"
-                ),
-            )
-        opening_plies = int(opening_plies)
-    else:
-        if opening_plies is not None:
-            raise HTTPException(
-                status_code=422,
-                detail="opening_plies only applies to PGN opening sets",
-            )
     opening_seed = body.opening_seed
     if opening_seed is None:
         opening_seed = random.randrange(1 << 31)
@@ -504,6 +492,28 @@ def create_tournament(
         config_snapshot["sprt"]["excluded_openings"] = (
             body.opening_exclude_fens or []
         )
+
+    if body.experiment is not None:
+        # V2.2-A: freeze the experiment envelope. The candidate/baseline
+        # launch configs are NOT duplicated — they are already frozen in
+        # engine_a/engine_b; this envelope only records the experiment
+        # GROUP identity, purpose, stage and the decision rule. A is
+        # ALWAYS the candidate and B the baseline (the statistics fields
+        # and the worker's candidate-perspective already mean exactly
+        # that); the mapping is fixed by the server, not user input.
+        config_snapshot["experiment"] = {
+            "schema_version": 1,
+            "experiment_id": body.experiment.experiment_id,
+            "purpose": body.experiment.purpose,
+            "stage": body.experiment.stage,
+            "candidate_side": "engine_a",
+            "baseline_side": "engine_b",
+            "decision_rule": (
+                "sprt"
+                if (body.sprt is not None and body.sprt.enabled)
+                else "fixed_pairs"
+            ),
+        }
 
     tournament = Tournament(
         name=body.name,
@@ -940,6 +950,12 @@ def _new_match_defaults(session, settings, query: dict) -> dict:
         "pairs": query.get("pairs") or prefs.get("pairs") or "10",
         "engine_a_elo": query.get("engine_a_elo") or "",
         "engine_b_elo": query.get("engine_b_elo") or "",
+        # V2.2-A: run-again carries the frozen experiment envelope as
+        # query params; never persisted into the last-used prefs.
+        "experiment_enabled": query.get("experiment_enabled") == "on",
+        "experiment_id": query.get("experiment_id") or "",
+        "experiment_stage": query.get("experiment_stage") or "",
+        "experiment_purpose": query.get("experiment_purpose") or "",
     }
 
 
@@ -954,6 +970,323 @@ def _preset_elo_limits(schema: dict) -> dict | None:
     if strength is None or strength.get("type") != "check":
         return None
     return {"min": elo.get("min"), "max": elo.get("max")}
+
+
+# ---------------------------------------------------------------------------
+# V2.2-B: formal experiment wizard (preview -> confirm -> DRAFT)
+# ---------------------------------------------------------------------------
+def _formal_draft_from_form(form: dict) -> "FormalExperimentDraft":
+    seed_raw = (form.get("opening_seed") or "").strip()
+    return FormalExperimentDraft(
+        experiment_id=(form.get("experiment_id") or "").strip(),
+        purpose=(form.get("experiment_purpose") or "").strip(),
+        stage=form.get("experiment_stage") or "",
+        candidate=(form.get("candidate") or "").strip(),
+        elo0=float(form.get("elo0") or 0),
+        elo1=float(form.get("elo1") or 10),
+        alpha=float(form.get("alpha") or 0.05),
+        beta=float(form.get("beta") or 0.05),
+        max_pairs=int(form.get("max_pairs") or 1000),
+        explicit_prior_tournament_ids=[
+            t.strip() for t in
+            (form.get("explicit_prior_tournament_ids") or "").split(",")
+            if t.strip()
+        ],
+        opening_seed=int(seed_raw) if seed_raw else None,
+        opening_set_id=(form.get("opening_set_id") or "").strip(),
+        opening_plies=(
+            int(form["opening_plies"])
+            if (form.get("opening_plies") or "").strip()
+            else None
+        ),
+    )
+
+
+def _resolve_formal_opening_or_error(session, opening_set_id):
+    opening = (
+        session.query(OpeningSet)
+        .filter(
+            OpeningSet.opening_set_id == opening_set_id,
+            OpeningSet.enabled.is_(True),
+        )
+        .first()
+    )
+    if opening is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown or disabled opening set {opening_set_id}",
+        )
+    return opening
+
+
+@admin_router.get(
+    "/admin/experiments/formal/new", response_class=HTMLResponse
+)
+def admin_formal_experiment_new(request: Request,
+                                session: Session = Depends(get_db)):
+    """The formal experiment wizard form. The baseline is not selectable:
+    it is always the current production behind channel:current-final."""
+    from ..services import formal_experiments
+    from ..services.versions import get_channel, get_version
+
+    presets = (
+        session.query(EnginePreset)
+        .filter(EnginePreset.enabled.is_(True))
+        .order_by(EnginePreset.created_at.desc())
+        .all()
+    )
+    versions_list = (
+        session.query(EngineVersion)
+        .filter(EngineVersion.status.in_(("candidate", "experimental")))
+        .order_by(EngineVersion.created_at.desc())
+        .all()
+    )
+    openings = (
+        session.query(OpeningSet)
+        .filter(OpeningSet.enabled.is_(True))
+        .order_by(OpeningSet.created_at.desc())
+        .all()
+    )
+    channel = get_channel(session, formal_experiments.BASELINE_CHANNEL)
+    baseline = get_version(session, channel.engine_version_id) if channel \
+        else None
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "formal_experiment_new.html",
+        {
+            "presets": presets,
+            "candidate_versions": versions_list,
+            "openings": openings,
+            "baseline": baseline,
+            "csrf_token": getattr(request.state, "csrf_token", ""),
+            "settings": request.app.state.settings,
+        },
+    )
+
+
+@admin_router.post(
+    "/admin/experiments/formal/preview",
+    response_class=HTMLResponse,
+    dependencies=[Depends(require_same_origin)],
+)
+async def admin_formal_experiment_preview(
+    request: Request, session: Session = Depends(get_db)
+):
+    """PURE-READ preview of the formal plan (zero DB mutation).
+
+    The seed is generated ONCE here when the form leaves it empty and is
+    echoed back; the confirm step must reuse exactly this seed so the
+    created sample equals the previewed sample. The plan digest is the
+    only accepted ticket to create — the confirm POST re-plans from
+    scratch and compares digests.
+    """
+    from ..services import formal_experiments
+
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    try:
+        draft = _formal_draft_from_form(form)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid formal experiment input: {exc}",
+        ) from exc
+    opening = _resolve_formal_opening_or_error(
+        session, draft.opening_set_id)
+
+    seed = draft.opening_seed
+    if seed is None:
+        seed = formal_experiments.generate_opening_seed()
+        draft = draft.model_copy(update={"opening_seed": seed})
+
+    # Freeze the RESOLVED opening plies into the echoed draft (the shared
+    # resolution contract: PGN default or explicit; EPD -> None) so the
+    # preview display, the plan digest, the hidden confirm field and the
+    # created snapshot all carry the exact same value.
+    try:
+        from ..services.openings import resolve_opening_plies
+
+        resolved_plies = resolve_opening_plies(opening, draft.opening_plies)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422, detail=str(exc)) from exc
+    if resolved_plies != draft.opening_plies:
+        draft = draft.model_copy(update={"opening_plies": resolved_plies})
+
+    plan = formal_experiments.plan_formal_experiment(
+        session, draft, opening, seed=seed)
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "formal_experiment_preview.html",
+        {
+            "plan": dict(plan),
+            "draft": draft,
+            "opening_set_id": draft.opening_set_id,
+            "csrf_token": getattr(request.state, "csrf_token", ""),
+            "settings": request.app.state.settings,
+        },
+    )
+
+
+@admin_router.post(
+    "/admin/experiments/formal/create",
+    response_class=RedirectResponse,
+    dependencies=[Depends(require_same_origin)],
+)
+async def admin_formal_experiment_create(
+    request: Request, session: Session = Depends(get_db)
+):
+    """Create the formal experiment DRAFT — after re-planning everything.
+
+    TOCTOU contract: the POST re-resolves the baseline channel, candidate,
+    opening file, prior runs and the deterministic sample, recomputes the
+    full plan and its digest, and ONLY creates when
+    ``new_digest == preview_digest``. Any drift (promotion happened,
+    preset edited, build disabled, opening file changed, priors changed)
+    returns 409 with zero creation. Creation itself goes through the
+    existing ``create_tournament`` (deterministic freeze) and stays a
+    DRAFT — never auto-started. The formal_protocol provenance block is
+    appended in the SAME transaction.
+    """
+    from ..services import formal_experiments
+
+    form = dict(await request.form())
+    validate_csrf_token(request, form)
+    try:
+        draft = _formal_draft_from_form(form)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid formal experiment input: {exc}",
+        ) from exc
+    preview_digest = (form.get("plan_digest") or "").strip()
+    if not preview_digest:
+        raise HTTPException(
+            status_code=422, detail="missing plan digest (preview first)")
+
+    opening = _resolve_formal_opening_or_error(
+        session, draft.opening_set_id)
+    if draft.opening_seed is None:
+        raise HTTPException(
+            status_code=422,
+            detail="missing opening seed (preview first)")
+
+    # Re-run the ENTIRE planner from live state.
+    plan = formal_experiments.plan_formal_experiment(
+        session, draft, opening, seed=draft.opening_seed)
+    if not plan.ok:
+        raise HTTPException(
+            status_code=422,
+            detail="; ".join(plan["errors"]),
+        )
+    if plan["plan_digest"] != preview_digest:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Formal experiment plan changed since the preview "
+                "(baseline/promotion, candidate identity, opening file, "
+                "or prior runs drifted); preview again."
+            ),
+        )
+
+    # Build the TournamentCreate through the existing creation path.
+    from ..schemas import ExperimentConfig, SprtConfig
+
+    body = TournamentCreate(
+        name=draft.experiment_id,
+        engine_a=(
+            {"version_id": plan["candidate"]["ref"]}
+            if plan["candidate"]["kind"] == "version"
+            else {"preset_id": plan["candidate"]["ref"]}
+        ),
+        # Baseline: ALWAYS the current production version, resolved by the
+        # planner (never user input).
+        engine_b={"version_id": plan["baseline"]["ref"]},
+        opening_set_id=draft.opening_set_id,
+        opening_plies=draft.opening_plies,
+        opening_seed=draft.opening_seed,
+        time_control="blitz_10_01",
+        pairs=draft.max_pairs,
+        allow_intentional_self_play=False,
+        arena_elo_enabled=False,  # formal SPRT never pollutes Arena Elo
+        sprt=SprtConfig(
+            enabled=True,
+            unit="pair",
+            model="pentanomial",
+            elo_model="logistic",
+            elo0=draft.elo0,
+            elo1=draft.elo1,
+            alpha=draft.alpha,
+            beta=draft.beta,
+            max_pairs=draft.max_pairs,
+        ),
+        experiment=ExperimentConfig(
+            experiment_id=draft.experiment_id,
+            purpose=draft.purpose,
+            stage=draft.stage,
+        ),
+        opening_exclude_fens=[
+            # the excluded FENs are recomputed deterministically from the
+            # same prior sources; they are identical to the preview's by
+            # construction (the digest covers them)
+        ],
+    )
+    # Recover the exact excluded FENs the plan computed: recompute them the
+    # same way so create_tournament's selection is byte-identical.
+    excluded_fens = _formal_excluded_fens(session, draft)
+    body = body.model_copy(update={"opening_exclude_fens": excluded_fens})
+
+    created = create_tournament(body, session, request.app.state.settings)
+    session.flush()
+    # Append the formal protocol provenance IN THE SAME TRANSACTION
+    # (create_tournament only flushes; the route's request transaction
+    # commits on success).
+    t = session.query(Tournament).filter(
+        Tournament.id == created["id"]).one()
+    snap = dict(t.config_snapshot or {})
+    snap["formal_protocol"] = {
+        "schema_version":
+            formal_experiments.FORMAL_PROTOCOL_SCHEMA_VERSION,
+        "baseline_channel": formal_experiments.BASELINE_CHANNEL,
+        "automatic_prior_tournament_ids":
+            plan["automatic_prior_tournament_ids"],
+        "explicit_prior_tournament_ids":
+            plan["explicit_prior_tournament_ids"],
+        "excluded_fens_count": plan["excluded_fens_count"],
+        "excluded_fens_sha256": plan["excluded_fens_sha256"],
+        "selected_indices_sha256":
+            plan["opening"]["selected_indices_sha256"],
+        "plan_digest": plan["plan_digest"],
+    }
+    t.config_snapshot = snap
+    session.flush()
+    return RedirectResponse(
+        url=(
+            f"{request.app.state.settings.base_path}/admin/tournaments/"
+            f"{created['id']}"
+        ),
+        status_code=303,
+    )
+
+
+def _formal_excluded_fens(session, draft) -> list[str]:
+    """Recompute the excluded FENs from the same prior sources the planner
+    used (identical result — the digest covers both)."""
+    from ..services import formal_experiments
+    from ..services.formal_experiments import (
+        _prior_opening_fens, _prior_runs_for_experiment,
+    )
+
+    sources: list[Tournament] = []
+    for tid in draft.explicit_prior_tournament_ids:
+        t = session.get(Tournament, tid)
+        if t is not None:
+            sources.append(t)
+    sources.extend(_prior_runs_for_experiment(session, draft.experiment_id))
+    fens: set[str] = set()
+    for t in sources:
+        fens.update(_prior_opening_fens(session, t))
+    return sorted(fens)
 
 
 @admin_router.get("/admin/tournaments/new", response_class=HTMLResponse)
@@ -1022,6 +1355,26 @@ def _parse_admin_side(form: dict, side: str) -> dict:
 async def admin_tournament_create(request: Request, session: Session = Depends(get_db)):
     form = dict(await request.form())
     validate_csrf_token(request, form)
+    # V2.2-A: the optional Experiment Context is all-or-nothing — when the
+    # checkbox is on, all three fields are required; when off, nothing is
+    # sent (no half-filled envelopes).
+    experiment = None
+    if form.get("experiment_enabled") == "on":
+        try:
+            experiment = ExperimentConfig(
+                experiment_id=(form.get("experiment_id") or "").strip(),
+                purpose=(form.get("experiment_purpose") or "").strip(),
+                stage=form.get("experiment_stage") or "",
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "experiment context is enabled: experiment_id, "
+                    "purpose and stage are all required (valid slug id, "
+                    "valid stage): " + str(exc).splitlines()[0]
+                ),
+            ) from exc
     body = TournamentCreate(
         name=form["name"],
         engine_a=_parse_admin_side(form, "a"),
@@ -1041,6 +1394,7 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
             else None
         ),
         arena_elo_enabled=form.get("arena_elo_enabled") == "on",
+        experiment=experiment,
     )
     # Reuse the API creation logic by calling it directly.
     created = create_tournament(body, session, request.app.state.settings)
@@ -1061,6 +1415,38 @@ async def admin_tournament_create(request: Request, session: Session = Depends(g
     return RedirectResponse(
         url=f"{request.app.state.settings.base_path}/admin/tournaments/{created['id']}",
         status_code=303,
+    )
+
+
+@admin_router.get(
+    "/admin/tournaments/{tournament_id}/experiment-status",
+    response_class=HTMLResponse,
+)
+def admin_tournament_experiment_status(
+    request: Request, tournament_id: str, session: Session = Depends(get_db)
+):
+    """V2.2-A: live experiment card fragment (pure read, zero mutation).
+
+    Polled by the tournament detail page every few seconds so pairs, ptnml,
+    LLR and the decision update without a full page reload.
+    """
+    templates = request.app.state.templates
+    tournament = _get_tournament_or_404(session, tournament_id)
+    from ..services.experiments import experiment_view, side_display_name
+
+    experiment = experiment_view(tournament)
+    if experiment is not None:
+        experiment["candidate_label"] = side_display_name(
+            experiment["candidate"])
+        experiment["baseline_label"] = side_display_name(
+            experiment["baseline"])
+    return templates.TemplateResponse(
+        request,
+        "_experiment_status.html",
+        {
+            "experiment": experiment,
+            "settings": request.app.state.settings,
+        },
     )
 
 
@@ -1139,8 +1525,37 @@ def admin_tournament_detail(
         custom_elo = (snap.get(side) or {}).get("custom_elo")
         if custom_elo is not None:
             run_again += f"&{side}_elo={custom_elo}"
+    # V2.2-A: run-again preserves the experiment envelope so a follow-up
+    # run of the same experiment group starts from the same context.
+    # BUT only for fixed-pair runs: a formal SPRT experiment cannot be
+    # "run again" through this form — the Admin New Match UI has no SPRT
+    # parameters (the formal wizard is V2.2-B), so a rerun would silently
+    # freeze a different decision contract (fixed_pairs) under the same
+    # experiment identity. Until the wizard exists, SPRT reruns must be
+    # set up deliberately, not via a misleading prefilled form.
+    env = snap.get("experiment") or {}
+    if env.get("experiment_id") and env.get("decision_rule") != "sprt":
+        from urllib.parse import quote
+
+        run_again += (
+            f"&experiment_enabled=on"
+            f"&experiment_id={quote(str(env.get('experiment_id')))}"
+            f"&experiment_stage={quote(str(env.get('stage')))}"
+            f"&experiment_purpose={quote(str(env.get('purpose')))}"
+        )
 
     from ..services.analysis import analysis_state
+
+    # V2.2-A: the experiment view (None for legacy matches without an
+    # envelope — the panel is simply not rendered).
+    from ..services.experiments import experiment_view, side_display_name
+
+    experiment = experiment_view(tournament)
+    if experiment is not None:
+        experiment["candidate_label"] = side_display_name(
+            experiment["candidate"])
+        experiment["baseline_label"] = side_display_name(
+            experiment["baseline"])
 
     game_analysis = {g.id: analysis_state(g) for g in games}
 
@@ -1178,6 +1593,7 @@ def admin_tournament_detail(
             "engine_a_label": engine_a_label,
             "engine_b_label": engine_b_label,
             "game_analysis": game_analysis,
+            "experiment": experiment,
             "rated_elo": rated_elo,
             "decisive_count": bulk_pending["decisive"],
             "losses_count": bulk_pending["losses"],

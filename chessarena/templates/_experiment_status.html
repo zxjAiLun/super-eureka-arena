@@ -1,0 +1,77 @@
+{# V2.2-A: experiment card fragment. PURE HTML — no hx-* polling attributes.
+   The stable #experiment-fragment wrapper on the tournament detail page
+   owns the polling and swaps this partial's content in. Legacy tournaments
+   (no envelope) render nothing. #}
+{% if experiment %}
+<section class="panel" id="experiment-panel">
+  <h3>Experiment</h3>
+  <p>
+    <strong>{{ experiment.experiment_id }}</strong>
+    <span class="status status-{{ experiment.stage }}">{{ experiment.stage }}</span>
+  </p>
+  <p class="muted">{{ experiment.purpose }}</p>
+
+  <dl class="result-grid">
+    <dt>Candidate</dt>
+    <dd>{{ experiment.candidate_label }}
+      {% if experiment.candidate.build_id %}<br>
+        <span class="muted"><code>{{ experiment.candidate.build_id }}</code>
+        {% if experiment.candidate.profile %} · profile
+          <code>{{ experiment.candidate.profile }}</code>{% endif %}</span>
+      {% endif %}
+    </dd>
+    <dt>Baseline</dt>
+    <dd>{{ experiment.baseline_label }}
+      {% if experiment.baseline.build_id %}<br>
+        <span class="muted"><code>{{ experiment.baseline.build_id }}</code>
+        {% if experiment.baseline.profile %} · profile
+          <code>{{ experiment.baseline.profile }}</code>{% endif %}</span>
+      {% endif %}
+    </dd>
+  </dl>
+
+  {% if experiment.sprt %}
+  <dl class="result-grid">
+    <dt>Decision</dt>
+    <dd>Pentanomial SPRT — H0: {{ experiment.sprt.elo0 }} Elo,
+        H1: {{ experiment.sprt.elo1 }} Elo ·
+        α {{ experiment.sprt.alpha }} / β {{ experiment.sprt.beta }}</dd>
+    <dt>Progress</dt>
+    <dd>{{ experiment.sprt.pairs }} / {{ experiment.sprt.max_pairs }} pairs
+        ({{ experiment.sprt.games }} games)</dd>
+    <dt>LLR</dt>
+    <dd>
+      <code>{{ "%.4f"|format(experiment.sprt.llr) }}</code>
+      between <code>{{ "%.4f"|format(experiment.sprt.lower_bound) }}</code>
+      and <code>{{ "%.4f"|format(experiment.sprt.upper_bound) }}</code>
+    </dd>
+    <dt>Ptnml</dt>
+    <dd><code>[{{ experiment.sprt.ptnml|join(", ") }}]</code></dd>
+  </dl>
+  <p>
+    <span class="status status-{{ 'production' if experiment.sprt.decision == 'ACCEPT_H1' else 'historical' }}">
+      {{ experiment.sprt.decision }}
+    </span>
+    {% if experiment.decision_interpretation %}
+    <span class="muted">{{ experiment.decision_interpretation }}</span>
+    {% endif %}
+  </p>
+  {% else %}
+  <dl class="result-grid">
+    <dt>Decision rule</dt>
+    <dd>Fixed-pair measurement</dd>
+    <dt>Progress</dt>
+    <dd>{{ experiment.pairs_completed }} / {{ experiment.pairs_total }} pairs
+        ({{ experiment.candidate_wins }}–{{ experiment.draws }}–{{ experiment.candidate_losses }}
+        W-D-L)</dd>
+  </dl>
+  <p class="muted">
+    No formal decision — this run has no sequential acceptance rule.
+  </p>
+  {% endif %}
+
+  <p class="muted">
+    State: <strong>{{ experiment.state }}</strong>
+  </p>
+</section>
+{% endif %}

@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · Formal Experiment Preview{% endblock %}
+{% block content %}
+<p><a href="{{ settings.base_path }}/admin/experiments/formal/new">&larr; Formal experiment</a></p>
+<h1>Formal experiment preview</h1>
+<p class="muted">
+  Pure preview — nothing has been created. The confirm step re-validates
+  every contract from live state; any drift rejects with 409.
+</p>
+
+<section class="panel">
+  <h3>Experiment</h3>
+  <dl class="result-grid">
+    <dt>ID</dt><dd><code>{{ plan.experiment.experiment_id }}</code></dd>
+    <dt>Stage</dt><dd><span class="status status-{{ plan.experiment.stage }}">{{ plan.experiment.stage }}</span></dd>
+    <dt>Purpose</dt><dd>{{ plan.experiment.purpose }}</dd>
+    <dt>Decision rule</dt><dd>pentanomial SPRT (fixed)</dd>
+    <dt>Arena Elo</dt><dd>OFF (formal test, never rated)</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h3>Candidate</h3>
+  {% if plan.candidate %}
+  <dl class="result-grid">
+    <dt>Kind</dt><dd>{{ plan.candidate.kind }} ({{ plan.candidate.ref }})</dd>
+    <dt>Name</dt><dd>{{ plan.candidate.display_name }}</dd>
+    <dt>Build</dt><dd><code>{{ plan.candidate.build_id }}</code></dd>
+    <dt>Source SHA</dt><dd><code>{{ plan.candidate.source_sha[:16] }}…</code></dd>
+    <dt>Binary SHA</dt><dd><code>{{ plan.candidate.binary_sha256[:16] }}…</code></dd>
+    <dt>Launch</dt><dd><code>{{ plan.candidate.command_args }} {{ plan.candidate.uci_options }}</code></dd>
+    <dt>Fingerprint</dt><dd><code>{{ plan.candidate.fingerprint[:16] }}…</code></dd>
+  </dl>
+  {% else %}
+  <p class="demo-error">candidate could not be resolved</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h3>Baseline — current-final</h3>
+  {% if plan.baseline %}
+  <dl class="result-grid">
+    <dt>Version</dt><dd>{{ plan.baseline.display_name }} <code>{{ plan.baseline.ref }}</code></dd>
+    <dt>Source SHA</dt><dd><code>{{ plan.baseline.source_sha[:16] }}…</code></dd>
+    <dt>Binary SHA</dt><dd><code>{{ plan.baseline.binary_sha256[:16] }}…</code></dd>
+    <dt>Launch</dt><dd><code>{{ plan.baseline.command_args }} {{ plan.baseline.uci_options }}</code></dd>
+    <dt>Fingerprint</dt><dd><code>{{ plan.baseline.fingerprint[:16] }}…</code></dd>
+  </dl>
+  {% else %}
+  <p class="demo-error">baseline could not be resolved</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h3>SPRT contract</h3>
+  <dl class="result-grid">
+    <dt>H0 / H1</dt><dd>{{ plan.sprt.elo0 }} / {{ plan.sprt.elo1 }} Elo</dd>
+    <dt>α / β</dt><dd>{{ plan.sprt.alpha }} / {{ plan.sprt.beta }}</dd>
+    <dt>Wald bounds</dt>
+    <dd><code>{{ "%.4f"|format(plan.sprt.lower_bound) }}</code> …
+        <code>{{ "%.4f"|format(plan.sprt.upper_bound) }}</code></dd>
+    <dt>Max pairs</dt><dd>{{ plan.sprt.max_pairs }} (pairs == max_pairs)</dd>
+    <dt>Model</dt><dd>{{ plan.sprt.model }} / {{ plan.sprt.unit }} / {{ plan.sprt.elo_model }} (fixed)</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h3>Openings</h3>
+  <dl class="result-grid">
+    <dt>Set</dt><dd><code>{{ plan.opening.opening_set_id }}</code></dd>
+    <dt>File SHA</dt><dd><code>{{ (plan.opening.file_sha256 or "")[:16] }}…</code></dd>
+    <dt>Plies / Seed</dt><dd>{{ plan.opening.plies or "—" }} / {{ plan.opening.seed }}</dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h3>Prior exclusion</h3>
+  <dl class="result-grid">
+    <dt>Automatic (same experiment)</dt>
+    <dd>{% for id in plan.automatic_prior_tournament_ids %}<code>{{ id[:8] }}</code>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</dd>
+    <dt>Additional (explicit)</dt>
+    <dd>{% for id in plan.explicit_prior_tournament_ids %}<code>{{ id[:8] }}</code>{% if not loop.last %}, {% endif %}{% else %}none{% endfor %}</dd>
+    <dt>Unique excluded FENs</dt><dd>{{ plan.excluded_fens_count }}</dd>
+    <dt>Exclusion SHA256</dt><dd><code>{{ plan.excluded_fens_sha256[:16] }}…</code></dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h3>New sample</h3>
+  <dl class="result-grid">
+    <dt>Eligible before / after exclusion</dt>
+    <dd>{{ plan.opening.eligible_before }} / {{ plan.opening.eligible_after }}</dd>
+    <dt>Selected</dt><dd>{{ plan.opening.selected_count }} pairs</dd>
+    <dt>Selected-indices SHA256</dt>
+    <dd><code>{{ (plan.opening.selected_indices_sha256 or "")[:16] }}…</code></dd>
+    <dt>First indices</dt>
+    <dd><code>{{ plan.opening.selected_indices }}</code></dd>
+  </dl>
+</section>
+
+{% if plan.errors %}
+<section class="panel">
+  <h3>Blocked</h3>
+  <p class="demo-error">This formal experiment cannot be created:</p>
+  <ul>
+    {% for e in plan.errors %}
+    <li class="demo-error">{{ e }}</li>
+    {% endfor %}
+  </ul>
+</section>
+{% else %}
+<section class="panel">
+  <h3>Confirm</h3>
+  <p class="muted">
+    Creating produces a <strong>DRAFT</strong> tournament only — it is not
+    started, enqueued, or given any CPU. The plan digest below pins this
+    exact contract; the confirm step re-validates everything from live
+    state and rejects on any drift.
+  </p>
+  <p class="muted">Plan digest: <code>{{ plan.plan_digest }}</code></p>
+  <form method="post"
+        action="{{ settings.base_path }}/admin/experiments/formal/create">
+    <input type="hidden" name="_csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="experiment_id" value="{{ draft.experiment_id }}">
+    <input type="hidden" name="experiment_stage" value="{{ draft.stage }}">
+    <input type="hidden" name="experiment_purpose" value="{{ draft.purpose }}">
+    <input type="hidden" name="candidate" value="{{ draft.candidate }}">
+    <input type="hidden" name="elo0" value="{{ draft.elo0 }}">
+    <input type="hidden" name="elo1" value="{{ draft.elo1 }}">
+    <input type="hidden" name="alpha" value="{{ draft.alpha }}">
+    <input type="hidden" name="beta" value="{{ draft.beta }}">
+    <input type="hidden" name="max_pairs" value="{{ draft.max_pairs }}">
+    <input type="hidden" name="opening_set_id" value="{{ draft.opening_set_id }}">
+    <input type="hidden" name="opening_plies" value="{{ draft.opening_plies or '' }}">
+    <input type="hidden" name="opening_seed" value="{{ draft.opening_seed }}">
+    <input type="hidden" name="explicit_prior_tournament_ids"
+           value="{{ draft.explicit_prior_tournament_ids|join(',') }}">
+    <input type="hidden" name="plan_digest" value="{{ plan.plan_digest }}">
+    <button type="submit" class="hp-start">Create formal experiment DRAFT</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

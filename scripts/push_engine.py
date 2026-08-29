@@ -21,7 +21,7 @@ touched, via the same sudo boundary the deploy user uses.
 Usage:
     python scripts/push_engine.py <local-binary> --name <build/preset id>
         [--host server1] [--platform linux-x86_64]
-        [--command-args ARG ...] [--uci-option Name=value ...]
+        [--command-args ARG ...] [--command-arg ARG ...] [--uci-option Name=value ...]
 """
 
 from __future__ import annotations
@@ -51,16 +51,46 @@ def run(argv: list[str]) -> None:
     subprocess.run(argv, check=True)
 
 
-def preset_args_for_remote(command_args: list[str]) -> list[str]:
-    """Translate a preset's command_args into register_candidate_preset.py
-    CLI arguments.
+def make_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("binary", type=Path)
+    parser.add_argument("--name", required=True, help="build id / preset id, e.g. candidate-20260809")
+    parser.add_argument("--host", default="server1")
+    parser.add_argument("--platform", default="linux-x86_64")
+    # `--command-args` takes several values at once, which argparse cannot do
+    # for values that begin with '-': `--command-args --profile current-final`
+    # is rejected outright, and `--command-args=--profile current-final`
+    # silently keeps only `--profile`. `--command-arg` is repeatable and takes
+    # exactly one value, so `--command-arg=--profile --command-arg=current-final`
+    # passes a leading-dash argument through intact. Both are accepted and
+    # concatenated in order, so existing invocations keep working.
+    parser.add_argument("--command-args", nargs="+", default=[])
+    parser.add_argument("--command-arg", action="append", default=[],
+                        metavar="ARG",
+                        help="one engine CLI argument; repeatable, and safe for "
+                             "values starting with '-' (use the '=' form, e.g. "
+                             "--command-arg=--profile)")
+    parser.add_argument("--uci-option", action="append", default=[])
+    return parser
 
-    A leading ``--profile <name>`` pair (the historical shape produced by the
-    old ``--profile`` shortcut) is forwarded as the script's ``--profile``
-    shortcut; every remaining token becomes one ``--command-arg=<token>``
-    flag.  This never relies on argparse accepting a bare leading-dash token
-    as a positional, which is what made the previous inline expansion
-    silently wrong for anything beyond a single profile pair.
+
+def resolve_command_args(namespace: argparse.Namespace) -> list[str]:
+    """Positional-order concatenation of both spellings."""
+    return list(namespace.command_args) + list(namespace.command_arg)
+
+
+def preset_args_for_remote(command_args: list[str]) -> list[str]:
+    """Render engine CLI args for the remote register_candidate_preset call.
+
+    The remote script now accepts a repeatable ``--command-arg=ARG`` flag, so
+    every token can be forwarded verbatim: a leading ``--profile <name>``
+    pair (the historical shape produced by the old ``--profile`` shortcut)
+    is forwarded as the script's ``--profile`` shortcut, and every remaining
+    token becomes one ``--command-arg=<token>`` flag.  This never relies on
+    argparse accepting a bare leading-dash token as a positional (which is
+    what made the earlier ``--command-args``-only expansion silently wrong
+    for anything beyond a single profile pair), and never shells the tokens
+    into one string.
     """
     if not command_args:
         return []
@@ -78,13 +108,7 @@ def preset_args_for_remote(command_args: list[str]) -> list[str]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("binary", type=Path)
-    parser.add_argument("--name", required=True, help="build id / preset id, e.g. candidate-20260809")
-    parser.add_argument("--host", default="server1")
-    parser.add_argument("--platform", default="linux-x86_64")
-    parser.add_argument("--command-args", nargs="+", default=[])
-    parser.add_argument("--uci-option", action="append", default=[])
+    parser = make_parser()
     args = parser.parse_args()
 
     binary = args.binary.resolve()
@@ -94,7 +118,7 @@ def main() -> int:
     sha = sha256_file(binary)
     build_id = args.name
     build_dir = f"{BUILDS_DIR}/{build_id}"
-    preset_argv = preset_args_for_remote(args.command_args)
+    preset_argv = preset_args_for_remote(resolve_command_args(args))
 
     # 1. Upload the binary to a staging path on the server.
     run(["scp", str(binary), f"{args.host}:/tmp/engine-push-{build_id}"])

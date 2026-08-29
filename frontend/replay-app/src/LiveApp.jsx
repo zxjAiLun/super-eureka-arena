@@ -5,6 +5,7 @@ import { shareForUi } from "./eval";
 import AnalysisPanel, {
   DEFAULT_ANALYSIS_DEPTH,
 } from "./AnalysisPanel";
+import SprtSummary from "./SprtSummary";
 
 const START_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
@@ -157,6 +158,12 @@ export default function LiveApp({ tournamentId, basePath }) {
     );
   }
   if (phase === "completed") {
+    // CONTINUE is the running SPRT state, not a final result: only a real
+    // terminal decision (ACCEPT_H1 / ACCEPT_H0 / MAX_PAIRS) renders as the
+    // "SPRT result" block.  A FAILED/CANCELLED SPRT match must not label its
+    // last pre-termination state as a result.
+    const hasFinalSprt =
+      payload.sprt && payload.sprt.decision !== "CONTINUE";
     return (
       <div className="demo-message">
         <p>
@@ -168,6 +175,12 @@ export default function LiveApp({ tournamentId, basePath }) {
               payload.candidate_losses
             )}.`}
         </p>
+        {hasFinalSprt && (
+          <div className="analysis-panel" style={{ textAlign: "left" }}>
+            <div className="analysis-score">SPRT result</div>
+            <SprtSummary sprt={payload.sprt} />
+          </div>
+        )}
         <p>
           {payload.match_url && (
             <a href={payload.match_url} className="action-link">
@@ -282,14 +295,22 @@ export default function LiveApp({ tournamentId, basePath }) {
       <div className="replay-side-col">
         <Badges data={payload} />
         {phase === "live" && payload.candidate_wins != null && (
-          <div className="live-meta">
-            Verified W-D-L {payload.candidate_wins}-{payload.draws}-
-            {payload.candidate_losses} · Δ Elo (A−B){" "}
-            {eloDeltaLabel(
-              payload.candidate_wins,
-              payload.draws,
-              payload.candidate_losses
-            )}
+          <div className="analysis-panel">
+            <div className="analysis-score">Match summary</div>
+            <div className="analysis-line">
+              Progress: {payload.pairs_completed ?? 0} / {payload.pairs_total}{" "}
+              pairs
+            </div>
+            <div className="analysis-line">
+              Verified W-D-L {payload.candidate_wins}-{payload.draws}-
+              {payload.candidate_losses} · Δ Elo (A−B){" "}
+              {eloDeltaLabel(
+                payload.candidate_wins,
+                payload.draws,
+                payload.candidate_losses
+              )}
+            </div>
+            {payload.sprt && <SprtSummary sprt={payload.sprt} />}
           </div>
         )}
         <AnalysisPanel

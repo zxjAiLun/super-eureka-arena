@@ -21,6 +21,7 @@ from sqlalchemy import (
     JSON,
     String,
     Text,
+    UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -174,12 +175,21 @@ ENGINE_VERSION_STATUSES = frozenset(
 
 
 class EngineVersion(Base):
-    """Permanent immutable chess identity == Elo participant.
+    """Permanent immutable CHESS/LAUNCH identity == Elo participant.
 
     ``version_id`` is the rating participant identity (NOT display_name and
     NOT the anonymous fingerprint). Launch configuration is SNAPSHOTTED at
     creation (build_id, command_args, uci_options, source_sha,
     binary_sha256); later EnginePreset edits never affect it.
+
+    V2.1 immutability contract: "immutable" covers exactly the identity
+    fields above — they can never change after creation. The lifecycle
+    metadata (``status``, ``public_visible``, ``rating_enabled``) is mutable
+    but ONLY via the controlled promotion flow
+    (``services.versions.promote_channel``): candidate (hidden, unrated)
+    -> production (public, rated) -> historical. Never edit it ad hoc.
+    The identity is WHO THE BINARY IS (source_sha/binary_sha256/launch
+    config), not which semantic promote-commit it corresponds to.
     """
 
     __tablename__ = "engine_versions"
@@ -213,8 +223,12 @@ class EngineVersion(Base):
 class EngineChannel(Base):
     """Mutable alias (e.g. ``current-final``) pointing at one EngineVersion.
 
-    Promotion = repoint the channel; neither EngineVersion is ever mutated.
-    The channel itself is not a participant and carries no rating.
+    Promotion = repoint the channel via the ATOMIC ``promote_channel`` flow
+    (old production → historical, target → production/public/rated, channel
+    repoint — one transaction, all-or-nothing). The channel itself is not a
+    participant and carries no rating. Existing tournaments/HumanGames hold
+    frozen snapshots, so a promotion only affects the NEXT creation through
+    the channel.
     """
 
     __tablename__ = "engine_channels"
@@ -404,6 +418,130 @@ class Event(Base):
     )
 
     tournament: Mapped["Tournament"] = relationship(back_populates="events")
+
+
+# Human-vs-engine game lifecycle (dark-launch feature).
+HUMAN_GAME_ACTIVE = "ACTIVE"
+HUMAN_GAME_FINISHED = "FINISHED"          # natural termination (mate/stale/...)
+HUMAN_GAME_RESIGNED = "RESIGNED"          # human resigned
+HUMAN_GAME_EXPIRED = "EXPIRED"            # TTL or idle timeout, applied lazily
+HUMAN_GAME_INTERRUPTED = "INTERRUPTED"    # abandoned after engine failures
+HUMAN_GAME_ENGINE_FAILED = "ENGINE_FAILED"  # engine error ended the game
+HUMAN_GAME_STATUSES = frozenset(
+    {
+        HUMAN_GAME_ACTIVE,
+        HUMAN_GAME_FINISHED,
+        HUMAN_GAME_RESIGNED,
+        HUMAN_GAME_EXPIRED,
+        HUMAN_GAME_INTERRUPTED,
+        HUMAN_GAME_ENGINE_FAILED,
+    }
+)
+HUMAN_GAME_TERMINAL_STATUSES = frozenset(
+    {
+        HUMAN_GAME_FINISHED,
+        HUMAN_GAME_RESIGNED,
+        HUMAN_GAME_EXPIRED,
+        HUMAN_GAME_INTERRUPTED,
+        HUMAN_GAME_ENGINE_FAILED,
+    }
+)
+
+
+class HumanGame(Base):
+    """One interactive human-vs-engine game (anonymous, token-authorized).
+
+    The opponent launch configuration is frozen into ``opponent_snapshot``
+    at creation (display_name, kind, preset/version/build ids, binary SHA,
+    command_args, uci_options) so later preset edits or channel promotions
+    never drift an in-progress game (engine-version-identity ADR).
+
+    ``game_token_hash`` stores the SHA-256 of a secret handed to the browser
+    exactly once at creation; every subsequent request must present it via
+    the ``X-Game-Token`` header (constant-time compare).
+
+    ``revision`` is the optimistic-concurrency counter: each accepted move
+    (human or engine) increments it, and move submissions must echo the
+    revision they were built against. ``engine_pending`` marks that the
+    worker still owes the engine reply after the latest human move.
+
+    Expiry is lazy: ``expires_at`` (absolute TTL) and ``idle_expires_at``
+    (no-move timeout) are checked whenever the game is accessed; there is no
+    background reaper because no engine process ever outlives a move.
+    """
+
+    __tablename__ = "human_games"
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=default_uuid
+    )
+    game_token_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    opponent_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    opponent_ref: Mapped[str] = mapped_column(String(128), nullable=False)
+    opponent_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    human_color: Mapped[str] = mapped_column(String(5), nullable=False)  # white|black
+    status: Mapped[str] = mapped_column(
+        String(16), default=HUMAN_GAME_ACTIVE, nullable=False
+    )
+    # Checkmate/draw result in chess.py outcome terms: "1-0" | "0-1" | "1/2-1/2";
+    # resigned games record the awarded result too ("0-1" when human is white).
+    result: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Machine-readable termination: checkmate | stalemate | ...
+    # resign | ttl_expired | idle_expired | engine_error | adjudicated
+    termination: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    current_fen: Mapped[str] = mapped_column(Text, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    engine_pending: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False
+    )
+    creator_ip: Mapped[str] = mapped_column(String(64), nullable=False)
+    # PGN artifact once the game is terminal (under run_root/human-games/).
+    pgn_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    last_move_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    idle_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    moves: Mapped[list["HumanGameMove"]] = relationship(
+        back_populates="human_game",
+        order_by="HumanGameMove.ply",
+        cascade="all, delete-orphan",
+    )
+
+
+class HumanGameMove(Base):
+    """Append-only ply log for one human game."""
+
+    __tablename__ = "human_game_moves"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    human_game_id: Mapped[str] = mapped_column(
+        ForeignKey("human_games.id"), index=True, nullable=False
+    )
+    ply: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-based
+    side: Mapped[str] = mapped_column(String(6), nullable=False)  # human|engine
+    uci: Mapped[str] = mapped_column(String(8), nullable=False)
+    san: Mapped[str] = mapped_column(String(12), nullable=False)
+    fen_after: Mapped[str] = mapped_column(Text, nullable=False)
+    # Wall-clock milliseconds the engine spent (engine rows only).
+    engine_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, nullable=False
+    )
+
+    human_game: Mapped["HumanGame"] = relationship(back_populates="moves")
+
+    __table_args__ = (
+        UniqueConstraint("human_game_id", "ply", name="uq_human_moves_ply"),
+    )
 
 
 class WorkerState(Base):

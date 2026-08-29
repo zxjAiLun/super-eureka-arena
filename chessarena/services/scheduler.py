@@ -444,7 +444,13 @@ class Scheduler:
         """S4.3D: update the formal pentanomial SPRT after every VERIFIED
         COMPLETE pair. Recomputes Ptnml from verified pairs, persists
         ``sprt.json``, and stops the tournament on a Wald boundary or at the
-        max-pairs ceiling. Returns True when the tournament was stopped."""
+        max-pairs ceiling. Returns True when the tournament was stopped.
+
+        V2.2-A: the ptnml/LLR/decision computation goes through the shared
+        ``sprt.tournament_sprt_state`` read model (the same code the admin
+        UI uses); only the persistence/stop logic lives here. The math
+        implementation (``sprt_llr_and_decision``) is unchanged.
+        """
         snap = tournament.config_snapshot or {}
         cfg = snap.get("sprt")
         if not cfg or not cfg.get("enabled"):
@@ -452,26 +458,9 @@ class Scheduler:
         from .. import models
         from . import artifacts, sprt as sprt_service
 
-        ptnml = [0] * 5
-        for pair_job in tournament.pair_jobs:
-            if pair_job.status != models.COMPLETED:
-                continue
-            verification = pair_job.verification or {}
-            computed = verification.get("candidate_perspective") or {}
-            ptnml[sprt_service.pair_points_index(
-                int(computed.get("wins", 0)),
-                int(computed.get("losses", 0)),
-                int(computed.get("draws", 0)),
-            )] += 1
-
-        result = sprt_service.sprt_llr_and_decision(
-            elo0=float(cfg["elo0"]),
-            elo1=float(cfg["elo1"]),
-            alpha=float(cfg["alpha"]),
-            beta=float(cfg["beta"]),
-            ptnml=ptnml,
-            max_pairs=int(cfg["max_pairs"]),
-        )
+        state = sprt_service.tournament_sprt_state(tournament)
+        assert state is not None  # enabled contract checked above
+        result = state
 
         # Persist the SPRT evidence next to the other tournament artifacts.
         run_dir = artifacts.tournament_run_dir(tournament.id)

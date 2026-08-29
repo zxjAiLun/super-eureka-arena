@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -77,9 +77,18 @@ class SprtConfig(BaseModel):
 
 
 class EngineVersionCreate(BaseModel):
-    """S4.3E Phase 1: create an immutable EngineVersion (version == Elo
-    participant). Exactly one of build_id (production/default artifact mode)
-    or preset_id (historical/experimental snapshot mode) is required."""
+    """S4.3E Phase 1 / V2.1 controlled lifecycle: create an immutable
+    EngineVersion (version == Elo participant). Exactly one of build_id
+    (production/default artifact mode) or preset_id (historical/experimental
+    snapshot mode) is required.
+
+    The HTTP surface can only mint candidate/experimental versions —
+    hidden and unrated. status=production/historical and the public/rated
+    flags are reachable ONLY through the controlled promotion flow
+    (``POST /engine-channels/{id}/promote``); registering a known PAST
+    production directly is a backfill operation reserved for the admin CLI
+    and internal scripts.
+    """
 
     version_id: str = Field(min_length=1, max_length=100)
     display_name: str = Field(min_length=1, max_length=200)
@@ -87,9 +96,9 @@ class EngineVersionCreate(BaseModel):
     preset_id: Optional[str] = Field(default=None, min_length=1)
     command_args: Optional[list[str]] = None
     uci_options: Optional[dict] = None
-    status: str = Field(default="candidate", pattern="^(candidate|production|historical|experimental)$")
-    rating_enabled: bool = True
-    public_visible: bool = True
+    status: str = Field(
+        default="candidate", pattern="^(candidate|experimental)$"
+    )
 
 
 class EngineVersionOut(BaseModel):
@@ -121,6 +130,74 @@ class EngineChannelOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ExperimentConfig(BaseModel):
+    """V2.2-A: the experiment envelope frozen into a tournament's
+    config_snapshot. Organizes EXISTING information — it never duplicates
+    the candidate/baseline launch configs (those live in
+    config_snapshot.engine_a / engine_b, already frozen).
+
+    Contract: Engine A is ALWAYS the candidate and Engine B the baseline
+    (that is how candidate_wins / candidate_losses / Δ Elo (A−B) and the
+    worker's candidate-perspective verification already interpret every
+    match); this envelope makes the implicit contract explicit. Users
+    cannot flip the mapping.
+    """
+
+    # Slug identity of the experiment GROUP across multiple runs
+    # (e.g. s9-c1-development-space). Never the tournament UUID.
+    experiment_id: str = Field(
+        min_length=1, max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$",
+    )
+    purpose: str = Field(min_length=1, max_length=2000)
+    stage: Literal[
+        "screening", "confirmation", "promotion", "benchmark"
+    ]
+
+
+class FormalExperimentDraft(BaseModel):
+    """V2.2-B: the wizard's input draft for a FORMAL experiment.
+
+    Only confirmation / promotion stages exist here — screening and
+    benchmark keep using the plain New Match form. There is deliberately
+    NO baseline field: the baseline is ALWAYS resolved server-side from
+    channel:current-final. Statistical model fields (unit/model/
+    elo_model) are fixed; only the hypothesis parameters are input.
+    """
+
+    experiment_id: str = Field(
+        min_length=1, max_length=100,
+        pattern=r"^[a-z0-9][a-z0-9._-]{0,99}$",
+    )
+    purpose: str = Field(min_length=1, max_length=2000)
+    stage: Literal["confirmation", "promotion"]
+
+    # Candidate: "preset:<id>" or "version:<id>" (never a baseline).
+    candidate: str = Field(min_length=3, max_length=200)
+
+    # SPRT hypothesis parameters (the model itself is fixed).
+    elo0: float = Field(default=0.0)
+    elo1: float = Field(default=10.0)
+    alpha: float = Field(default=0.05, gt=0.0, lt=0.5)
+    beta: float = Field(default=0.05, gt=0.0, lt=0.5)
+    max_pairs: int = Field(default=1000, ge=1)
+
+    # Opening independence: prior tournaments to exclude (in addition to
+    # the automatic same-experiment discovery).
+    explicit_prior_tournament_ids: list[str] = Field(default_factory=list)
+
+    # Empty => the server generates one at PREVIEW time and it is frozen
+    # into the plan digest (preview sample == created sample).
+    opening_seed: Optional[int] = Field(default=None, ge=0)
+    opening_set_id: str = Field(min_length=1)
+    opening_plies: Optional[int] = Field(default=None, ge=1)
+
+    # The plan digest from the preview this create confirms. Required on
+    # create; the server recomputes everything and compares.
+    plan_digest: Optional[str] = Field(default=None, min_length=64,
+                                       max_length=64)
+
+
 class TournamentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     engine_a: EngineRef
@@ -136,6 +213,8 @@ class TournamentCreate(BaseModel):
     opening_seed: Optional[int] = Field(default=None, ge=0)
     # S4.3D: optional frozen SPRT contract (formal promotion test).
     sprt: Optional[SprtConfig] = None
+    # V2.2-A: optional experiment envelope (frozen into config_snapshot).
+    experiment: Optional[ExperimentConfig] = None
     # S4.3D: normalized starting FENs to exclude from the opening sample
     # (prior tournaments must not leak into the formal test).
     opening_exclude_fens: Optional[list[str]] = None
@@ -332,6 +411,10 @@ class LiveOut(BaseModel):
     candidate_losses: Optional[int] = None
     draws: Optional[int] = None
     match_url: Optional[str] = None
+    # P4.12 follow-up: verified pair progress for the public match summary.
+    pairs_completed: Optional[int] = None
+    # S4.3D SPRT evidence (whitelisted display fields from sprt.json).
+    sprt: Optional[dict] = None
     # P4.11 live telemetry (only present when the debug stream is available).
     current_fen: Optional[str] = None
     side_to_move: Optional[str] = None
@@ -340,3 +423,62 @@ class LiveOut(BaseModel):
     telemetry_age_s: Optional[int] = None
     white: Optional[LiveSideOut] = None
     black: Optional[LiveSideOut] = None
+
+
+# ---------------------------------------------------------------------------
+# Human vs Engine play (dark launch; anonymous, token-authorized)
+# ---------------------------------------------------------------------------
+class HumanOpponentOut(BaseModel):
+    """One selectable opponent (allowlist entry, whitelisted fields only)."""
+
+    id: str  # the allowlist ref, e.g. "preset:stockfish-limited-2000"
+    display_name: str
+    kind: str  # "stockfish" | "engine"
+    strength_label: Optional[str] = None
+
+
+class HumanGameCreate(BaseModel):
+    opponent: str = Field(min_length=1, max_length=128)
+    human_color: str = Field(pattern="^(white|black)$")
+
+
+class HumanMoveIn(BaseModel):
+    uci: str = Field(pattern="^[a-h][1-8][a-h][1-8][qrbn]?$")
+    expected_revision: int = Field(ge=0)
+
+
+class HumanMoveOut(BaseModel):
+    ply: int
+    side: str  # human | engine
+    uci: str
+    san: str
+    fen_after: str
+    engine_ms: Optional[int] = None
+
+
+class HumanGameOut(BaseModel):
+    """Authoritative game state (requires the per-game secret token).
+
+    Never exposes opponent provenance beyond the display name: no build ids,
+    binary SHAs, paths, UCI options or IP addresses.
+    """
+
+    id: str
+    status: str
+    human_color: str
+    opponent_name: str
+    opponent_kind: str
+    revision: int
+    engine_pending: bool
+    fen: str
+    side_to_move: Optional[str] = None
+    result: Optional[str] = None
+    termination: Optional[str] = None
+    in_check: bool = False
+    moves: List[HumanMoveOut] = Field(default_factory=list)
+
+
+class HumanGameCreateOut(HumanGameOut):
+    """Creation response: carries the secret token exactly once."""
+
+    game_token: str

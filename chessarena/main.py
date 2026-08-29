@@ -13,7 +13,15 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .api import builds, health, openings, public, tournaments, versions
+from .api import (
+    builds,
+    health,
+    human_play,
+    openings,
+    public,
+    tournaments,
+    versions,
+)
 from .config import Settings, get_settings
 from .db import bind_session_factory, make_engine, make_session_factory
 from .services import artifacts
@@ -65,6 +73,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(versions.router, prefix=api_prefix)
     app.include_router(tournaments.router, prefix=api_prefix)
     app.include_router(tournaments.admin_router, prefix=bp)
+    app.include_router(versions.admin_router, prefix=bp)
+    app.include_router(builds.admin_router, prefix=bp)
 
     # Public, anonymous replay: read-only JSON under /public-api/v1 and the
     # public HTML pages (home, matches, match detail, game replay).  Nginx
@@ -72,6 +82,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # public.
     app.include_router(public.router, prefix=f"{bp}/public-api/v1")
     app.include_router(public.pages_router, prefix=bp)
+
+    # Human vs Engine play (dark launch): the whole subtree — JSON and HTML —
+    # fails closed with 404 while ARENA_HUMAN_PLAY_ENABLED is off.
+    app.include_router(human_play.router, prefix=f"{bp}/public-api/v1")
+    app.include_router(human_play.pages_router, prefix=bp)
 
     app.mount(f"{bp}/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 

@@ -1,31 +1,5 @@
 {% extends "public_base.html" %}
-{% block title %}ChessArena — Ratings
-<h2>EngineVersions</h2>
-<p class="muted">
-  Permanent immutable chess identities (version == Elo participant). The
-  <code>CurrentFinal</code> channel points at the current production version.
-</p>
-{% if versions %}
-<table class="match-table">
-  <thead>
-    <tr><th>Version</th><th>Identity</th><th>Status</th><th>Build</th><th>Channel</th></tr>
-  </thead>
-  <tbody>
-    {% for v in versions %}
-    <tr>
-      <td>{{ v.display_name }}</td>
-      <td><code>{{ v.version_id }}</code></td>
-      <td><span class="status status-{{ v.status }}">{{ v.status }}</span></td>
-      <td><code>{{ v.build_id }}</code></td>
-      <td>{% if v.channel %}<code>{{ v.channel }}</code>{% else %}&mdash;{% endif %}</td>
-    </tr>
-    {% endfor %}
-  </tbody>
-</table>
-{% else %}
-<p class="muted">No EngineVersions registered yet.</p>
-{% endif %}
-{% endblock %}
+{% block title %}ChessArena — Ratings{% endblock %}
 {% block content %}
 <h1>Arena Ratings</h1>
 <p class="muted">
@@ -46,6 +20,8 @@
   <thead>
     <tr>
       <th>Engine / Model</th>
+      <th>Version</th>
+      <th>Channel</th>
       <th>Elo</th>
       <th>Games</th>
       <th>W-D-L</th>
@@ -56,6 +32,12 @@
     {% for e in engines %}
     <tr>
       <td>{{ e.display_name }}</td>
+      <td>
+        {% if e.version_id %}<code>{{ e.version_id }}</code>
+        {% elif e.status == "fixed" %}<span class="muted">fixed anchor</span>
+        {% else %}<code>{{ e.identity }}</code>{% endif %}
+      </td>
+      <td>{% if e.channel %}<code>{{ e.channel }}</code>{% else %}&mdash;{% endif %}</td>
       <td>{{ e.rating }}</td>
       <td>{{ "—" if e.status == "fixed" else e.games }}</td>
       <td>
@@ -65,7 +47,8 @@
       </td>
       <td>
         <span class="status status-{{ e.status }}">
-          {{ {"fixed": "Fixed", "initial": "Initial", "rated": "Rated"}[e.status] }}
+          {{ {"fixed": "Fixed Anchor", "initial": "Initial",
+              "rated": "Rated"}[e.status] }}
         </span>
       </td>
     </tr>

@@ -10,12 +10,28 @@
   tournament matching both use it.
 - Two immutable configs with different version_ids but the SAME fingerprint
   are rejected in Phase 1.
+
+Immutability contract (V2.1, frozen): "immutable" refers to the CHESS /
+LAUNCH identity only — the fields ``version_id, build_id, command_args,
+uci_options, source_sha, binary_sha256, identity_fingerprint`` can never
+change after creation.  The lifecycle metadata ``status, public_visible,
+rating_enabled`` is mutable, but ONLY through the controlled promotion flow
+(``promote_channel``) — never ad-hoc edits.  A version's identity is WHO THE
+BINARY IS, not which semantic promote-commit it corresponds to.
+
+Channel promotion contract: ``promote_channel`` performs the whole
+demote-old → promote-new → repoint-channel sequence in ONE transaction; any
+failure rolls back everything (no half-promotion states).  It never touches
+existing frozen snapshots: tournaments froze their config at creation and
+HumanGames froze their opponent snapshot at creation, so a promotion affects
+only the NEXT game created through the channel.
 """
 
 from __future__ import annotations
 
 from ..models import (
     ENGINE_VERSION_STATUSES,
+    RESULT_TERMINAL_STATUSES,
     EngineBuild,
     EngineChannel,
     EnginePreset,
@@ -109,12 +125,19 @@ def create_version_from_build(
     command_args: list | None = None,
     uci_options: dict | None = None,
     status: str = "candidate",
-    rating_enabled: bool = True,
-    public_visible: bool = True,
+    rating_enabled: bool = False,
+    public_visible: bool = False,
 ) -> EngineVersion:
     """Production/default artifact mode: launch identity is the artifact's
     default behavior; source/binary identity comes from the registered build
-    (never from caller-provided values)."""
+    (never from caller-provided values).
+
+    V2.1 controlled lifecycle: a fresh version defaults to candidate /
+    hidden / unrated; the promotion flow flips it to production / public /
+    rated.  Callers that deliberately want another initial lifecycle (e.g.
+    registering a KNOWN past production directly as historical) pass the
+    flags explicitly.
+    """
     build = _build_or_error(session, build_id)
     args = list(command_args or [])
     opts = dict(uci_options or {})
@@ -143,12 +166,17 @@ def create_version_from_preset(
     display_name: str,
     preset_id: str,
     build_id: str | None = None,
-    status: str = "historical",
-    rating_enabled: bool = True,
-    public_visible: bool = True,
+    status: str = "candidate",
+    rating_enabled: bool = False,
+    public_visible: bool = False,
 ) -> EngineVersion:
     """Historical/experimental profile mode: SNAPSHOT the preset's launch
-    configuration at creation; later preset edits are irrelevant."""
+    configuration at creation; later preset edits are irrelevant.
+
+    Same controlled-lifecycle defaults as ``create_version_from_build``
+    (candidate / hidden / unrated unless explicitly overridden, e.g. when
+    registering a known past production directly as historical).
+    """
     preset = (
         session.query(EnginePreset)
         .filter(EnginePreset.preset_id == preset_id)
@@ -236,3 +264,290 @@ def get_channel(session, channel_id: str) -> EngineChannel | None:
 
 def list_channels(session) -> list[EngineChannel]:
     return session.query(EngineChannel).order_by(EngineChannel.channel_id).all()
+
+
+# ---------------------------------------------------------------------------
+# Channel promotion (V2.1)
+# ---------------------------------------------------------------------------
+class PromotionPlan(dict):
+    """Renderable dry-run plan. Dict subkeys are JSON-stable for logging."""
+
+    @property
+    def ok(self) -> bool:
+        return not self["errors"]
+
+
+def validate_version_build_provenance(
+    session, version: EngineVersion, *, label: str = "target"
+) -> list[str]:
+    """Runtime/provenance re-validation of an EngineVersion against the
+    CURRENT EngineBuild registry. Shared by every production-grade flow
+    (channel promotion, formal experiments) so there is ONE gate:
+
+        build exists
+        build.enabled == true
+        build.git_sha       == version.source_sha
+        build.binary_sha256 == version.binary_sha256
+
+    Returns a list of human-readable errors (empty = valid)."""
+    errors: list[str] = []
+    build = (
+        session.query(EngineBuild)
+        .filter(EngineBuild.build_id == version.build_id)
+        .first()
+    )
+    if build is None:
+        errors.append(
+            f"{label} {version.version_id} references unknown build "
+            f"{version.build_id}"
+        )
+        return errors
+    if not build.enabled:
+        errors.append(
+            f"{label} {version.version_id} build {version.build_id} "
+            f"is disabled"
+        )
+    if build.git_sha != version.source_sha:
+        errors.append(
+            f"{label} {version.version_id} provenance mismatch: "
+            f"source_sha {version.source_sha} != registry git_sha "
+            f"{build.git_sha}"
+        )
+    if build.binary_sha256 != version.binary_sha256:
+        errors.append(
+            f"{label} {version.version_id} provenance mismatch: "
+            f"binary_sha256 {version.binary_sha256} != registry "
+            f"binary_sha256 {build.binary_sha256}"
+        )
+    return errors
+
+
+def _validate_target_build(session, target: EngineVersion) -> list[str]:
+    """Production gate for promotion: the target's frozen provenance must
+    still match the CURRENT registry (thin wrapper over the shared
+    validator)."""
+    return validate_version_build_provenance(session, target)
+
+
+def _validate_production_launch_identity(target: EngineVersion) -> list[str]:
+    """Production gate: only the artifact's DEFAULT launch identity may
+    ever reach production (the frozen V2.1 anti-garbage contract).
+
+    The identity fingerprint includes command_args/uci_options, so a
+    production version launched via an explicit profile alias (or any
+    non-default UCI config) would be an artificial SECOND identity for the
+    same chess player.  Profile/config identities may exist as
+    candidates/experimental and play in tournaments; if one wins, the
+    Engine repo promotes it, a NEW default-production artifact is built,
+    and THAT version (command_args=[], uci_options={}) is the one promoted.
+
+    This gate runs regardless of HOW the version was created (HTTP, CLI,
+    internal script, preset snapshot) — promotion is the single last door
+    to the production status."""
+    errors: list[str] = []
+    if list(target.command_args or []):
+        errors.append(
+            f"target {target.version_id} production launch must use the "
+            f"artifact default command_args=[] "
+            f"(got {list(target.command_args)})"
+        )
+    if dict(target.uci_options or {}):
+        errors.append(
+            f"target {target.version_id} production launch must use the "
+            f"artifact default uci_options={{}} "
+            f"(got {dict(target.uci_options)})"
+        )
+    return errors
+
+
+def plan_channel_promotion(
+    session, channel_id: str, target_version_id: str
+) -> PromotionPlan:
+    """Build (but do NOT execute) a promotion plan.
+
+    Pure read: zero DB mutation.  The plan lists every lifecycle transition
+    that ``promote_channel`` would perform, plus informational impact counts.
+    Informational counts never block promotion: tournaments and human games
+    run on frozen snapshots, so a promotion only affects the NEXT game
+    created through the channel.
+
+    Fail-closed conditions (block promotion):
+      unknown channel / unknown target / noop / target already production
+      on another channel / target historical / target build disabled or
+      provenance-mismatched against the CURRENT registry.
+    """
+    from ..models import HumanGame, Tournament
+
+    errors: list[str] = []
+    channel = get_channel(session, channel_id)
+    current_version: EngineVersion | None = None
+    if channel is None:
+        errors.append(f"unknown channel {channel_id}")
+    else:
+        current_version = get_version(session, channel.engine_version_id)
+        if current_version is None:
+            errors.append(
+                f"channel {channel_id} points at unknown version "
+                f"{channel.engine_version_id}"
+            )
+    target = get_version(session, target_version_id)
+    if target is None:
+        errors.append(f"unknown engine_version_id {target_version_id}")
+    elif channel is not None and current_version is not None:
+        if target.version_id == current_version.version_id:
+            errors.append(
+                f"channel {channel_id} already points at "
+                f"{target_version_id}"
+            )
+        if target.status == "historical":
+            errors.append(
+                f"target {target_version_id} is historical and cannot be "
+                f"promoted"
+            )
+        if target.status == "production":
+            errors.append(
+                f"target {target_version_id} is already production on "
+                f"another channel"
+            )
+        # Production gate: the target's build must still be registered,
+        # enabled, and provenance-consistent (P1-2), AND it must carry the
+        # artifact's default launch identity — no profile aliases or
+        # non-default UCI configs may ever reach production (V2.1-A
+        # Repair 2).
+        errors.extend(_validate_target_build(session, target))
+        errors.extend(_validate_production_launch_identity(target))
+
+    plan = PromotionPlan(
+        channel_id=channel_id,
+        current=None if current_version is None else _plan_version(
+            current_version
+        ),
+        target=None if target is None else _plan_version(target),
+        after={
+            "old_status": (
+                "historical" if current_version is not None else None
+            ),
+            "target_status": "production",
+            "target_public_visible": True,
+            "target_rating_enabled": True,
+            "channel_points_to": target_version_id,
+        },
+        errors=errors,
+    )
+
+    # Informational impact (never blocks): target-specific counts resolved
+    # through the SAME participant resolver the ratings service uses, so a
+    # legacy snapshot whose frozen fingerprint matches the target counts as
+    # the target's history.
+    if target is not None:
+        plan["rated_history_matches_for_target"] = _count_tournaments(
+            session, target.version_id,
+            statuses=tuple(RESULT_TERMINAL_STATUSES),
+            rated_only=True,
+        )
+        plan["active_tournaments_referencing_target"] = _count_tournaments(
+            session, target.version_id,
+            statuses=("QUEUED", "RUNNING"),
+            rated_only=False,
+        )
+    if channel is not None and current_version is not None:
+        plan["active_tournaments_referencing_current"] = _count_tournaments(
+            session, current_version.version_id,
+            statuses=("QUEUED", "RUNNING"),
+            rated_only=False,
+        )
+    if channel is not None:
+        plan["active_human_games_on_channel"] = (
+            session.query(HumanGame)
+            .filter(HumanGame.opponent_ref == f"channel:{channel_id}")
+            .filter(HumanGame.status == "ACTIVE")
+            .count()
+        )
+    return plan
+
+
+def _count_tournaments(
+    session,
+    version_id: str,
+    *,
+    statuses: tuple,
+    rated_only: bool,
+) -> int:
+    """Tournaments whose frozen sides resolve to ``version_id`` via the
+    authoritative participant resolver (version_id match OR unique frozen
+    fingerprint match)."""
+    from ..models import Tournament
+    from .ratings import resolve_participant_id
+
+    count = 0
+    rows = (
+        session.query(Tournament)
+        .filter(Tournament.status.in_(statuses))
+        .all()
+    )
+    for t in rows:
+        if rated_only and not t.arena_elo_enabled:
+            continue
+        snap = t.config_snapshot or {}
+        for side_key in ("engine_a", "engine_b"):
+            if resolve_participant_id(session, snap.get(side_key) or {}) \
+                    == version_id:
+                count += 1
+                break
+    return count
+
+
+def _plan_version(version: EngineVersion) -> dict:
+    return {
+        "version_id": version.version_id,
+        "display_name": version.display_name,
+        "build_id": version.build_id,
+        "source_sha": version.source_sha,
+        "binary_sha256": version.binary_sha256,
+        "identity_fingerprint": version.identity_fingerprint,
+        "status": version.status,
+    }
+
+
+def promote_channel(
+    session, channel_id: str, target_version_id: str
+) -> PromotionPlan:
+    """Atomically promote ``target_version_id`` on ``channel_id``.
+
+    Single transaction:
+        old production  → historical (public/rating untouched)
+        target          → production + public_visible + rating_enabled
+        channel         → target
+    Any failure (validation, DB error) rolls back EVERYTHING — no partial
+    demotion, no channel drift.  Immutable fields are never touched; callers
+    can diff them byte-for-byte before/after to prove it.
+
+    Existing tournaments/HumanGames run on frozen snapshots and are not
+    affected; the promotion only changes what the channel resolves to for
+    the NEXT creation.
+    """
+    plan = plan_channel_promotion(session, channel_id, target_version_id)
+    if not plan.ok:
+        raise VersionError("; ".join(plan["errors"]))
+
+    try:
+        current_version = get_version(session, plan["current"]["version_id"])
+        target = get_version(session, target_version_id)
+        # Demote the old production (lifecycle metadata only).
+        current_version.status = "historical"
+        session.add(current_version)
+        # Promote the target (lifecycle metadata only).
+        target.status = "production"
+        target.public_visible = True
+        target.rating_enabled = True
+        session.add(target)
+        # Repoint the channel.
+        channel = get_channel(session, channel_id)
+        channel.engine_version_id = target_version_id
+        channel.updated_at = utcnow()
+        session.add(channel)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    return plan

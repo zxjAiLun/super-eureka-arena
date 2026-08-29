@@ -180,6 +180,7 @@ def test_zero_game_participants_show_initial(app_client, engine_factory,
             display_name="ChessEngine Production",
             preset_id="chessengine-production",
             status="historical",
+            public_visible=True, rating_enabled=True,
         )
         versions.create_version_from_build(
             session,
@@ -188,6 +189,7 @@ def test_zero_game_participants_show_initial(app_client, engine_factory,
             build_id=manifest["build_id"],
             command_args=[],
             status="production",
+            public_visible=True, rating_enabled=True,
         )
         rows = ratings.compute_ratings(session)["blitz_3_2"]["engines"]
     names = {r["display_name"]: r for r in rows}
@@ -333,6 +335,7 @@ def test_delete_changes_recomputation(engine_factory, tournament_factory,
             display_name="ChessEngine Production",
             preset_id="chessengine-production",
             status="production",
+            public_visible=True, rating_enabled=True,
         )
     tid = _completed_rated(engine_factory, tournament_factory,
                            wins=10, losses=0, draws=0, anchor=SF_A)
@@ -498,6 +501,7 @@ def test_history_only_participant_scoped_to_its_pool(
             session, version_id="ce-public-v1", display_name="ChessEngine Production",
             build_id=manifest["build_id"], command_args=[],
             status="production",
+            public_visible=True, rating_enabled=True,
         )
     ghost = {
         "preset_id": "archived-engine",

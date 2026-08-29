@@ -7,10 +7,16 @@
   <a href="{{ settings.base_path }}/live">Live</a>
   <a href="{{ settings.base_path }}/matches/">Matches</a>
   <a href="{{ settings.base_path }}/ratings/">Ratings</a>
+  {% if settings.human_play_enabled %}
+    <a href="{{ settings.base_path }}/human-play/">Play</a>
+  {% endif %}
   <span class="nav-spacer" aria-hidden="true"></span>
   {% if admin %}
     <a href="{{ settings.base_path }}/admin/">Dashboard</a>
     <a href="{{ settings.base_path }}/admin/tournaments/new">New Match</a>
+    <a href="{{ settings.base_path }}/admin/experiments/formal/new">Formal Experiment</a>
+    <a href="{{ settings.base_path }}/admin/builds/">Builds</a>
+    <a href="{{ settings.base_path }}/admin/versions/">Versions</a>
   {% else %}
     <a href="{{ settings.base_path }}/admin/">Admin</a>
   {% endif %}

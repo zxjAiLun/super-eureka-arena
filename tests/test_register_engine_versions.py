@@ -71,6 +71,37 @@ def test_backfill_missing_build_with_build_dir_works(engine_factory, tmp_path,
         assert v.identity_fingerprint == backfill.PRODUCTION["identity_fingerprint"]
 
 
+def test_backfill_fresh_install_with_wrong_sha_blocked(
+        engine_factory, tmp_path, registered, monkeypatch):
+    """P1: a fresh install whose registered build does NOT match the frozen
+    identity (git_sha / binary_sha256) must be BLOCKED — no production
+    EngineVersion, no channel repoint.  install_build.py only proves the
+    binary matches its own manifest; the backfill must re-verify against the
+    declared identity."""
+    artifact = _artifact_dir(tmp_path, git_sha="0" * 40)
+    manifest = json.loads((artifact / "manifest.json").read_text())
+    assert manifest["build_id"] == backfill.PRODUCTION["build_id"]
+
+    def fake_install(argv, **kwargs):
+        _register_build(engine_factory, manifest)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(backfill.subprocess, "run", fake_install)
+    with engine_factory() as session:
+        report = backfill.run_backfill(session, production_build_dir=artifact)
+    assert "BLOCKED: freshly registered build does not match" in (
+        report["production_build"])
+    assert "production_version" not in report or "created" not in report.get(
+        "production_version", "")
+    assert report["channel"] == (
+        "BLOCKED: production version identity not verified; "
+        "channel not pointed"
+    )
+    with engine_factory() as session:
+        assert versions.get_version(session, "ce-currentfinal-20260811") is None
+        assert versions.get_channel(session, "current-final") is None
+
+
 def test_backfill_exact_build_idempotent(engine_factory, tmp_path, registered):
     """Existing exact build/version => idempotent success, channel pointed."""
     artifact = _artifact_dir(tmp_path)

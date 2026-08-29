@@ -13,6 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from sqlalchemy.orm import Session
@@ -225,6 +227,29 @@ def _current_pair(t: Tournament):
     return None
 
 
+def _sprt_summary(t: Tournament) -> Optional[dict]:
+    """Whitelisted SPRT evidence (S4.3D) from the tournament's sprt.json —
+    display fields only, never binary SHAs / preset ids / opening internals.
+    Returns None when the match has no SPRT configuration or no evidence yet."""
+    from ..services import artifacts
+
+    path = artifacts.tournament_run_dir(t.id) / "sprt.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    out = {
+        k: data.get(k)
+        for k in ("elo_model", "elo0", "elo1", "lower_bound", "upper_bound",
+                  "pairs", "games", "ptnml", "llr", "decision")
+    }
+    if out.get("decision") is None:
+        return None
+    return out
+
+
 def _live_payload(session: Session, settings, t: Tournament) -> dict:
     """Build the LiveOut payload for a single tournament."""
     base = {
@@ -241,9 +266,11 @@ def _live_payload(session: Session, settings, t: Tournament) -> dict:
         "time_control": t.time_control,
         "opening_set_id": t.opening_set_id,
         "pairs_total": t.requested_pairs,
+        "pairs_completed": t.completed_pairs,
         "candidate_wins": t.candidate_wins,
         "candidate_losses": t.candidate_losses,
         "draws": t.draws,
+        "sprt": _sprt_summary(t),
     }
     if t.status in ENDED_STATUSES:
         result = {
@@ -523,26 +550,41 @@ def public_ratings(
     pools = {key: tc_label(key) for key in TIME_CONTROLS}
     selected = tc if tc in pools else "blitz_3_2"
     rows = all_ratings.get(selected, {"engines": [], "anchors": []})
-    engines = [
-        {
-            "display_name": e["display_name"],
-            "rating": e["rating"],
-            "games": e["games"],
-            "wins": e["wins"],
-            "draws": e["draws"],
-            "losses": e["losses"],
-            "status": e["status"],
-        }
-        for e in rows["engines"]
-    ]
-    # S4.3E Phase 1: version catalog + channel mapping on the public page.
-    versions = session.query(EngineVersion).order_by(
-        EngineVersion.created_at.asc()
-    ).all()
+    # S4.3E Phase 1: channel mapping for the EngineVersion identity columns.
     channels = session.query(EngineChannel).order_by(
         EngineChannel.channel_id.asc()
     ).all()
     channel_map = {c.engine_version_id: c.channel_id for c in channels}
+    engines = []
+    for e in rows["engines"]:
+        pid = e.get("participant_id") or ""
+        if e["status"] == "fixed":
+            version_id = None
+            identity = None
+        elif pid.startswith("legacy:"):
+            version_id = None
+            identity = pid
+        else:
+            version_id = pid
+            identity = None
+        engines.append(
+            {
+                "display_name": e["display_name"],
+                "rating": e["rating"],
+                "games": e["games"],
+                "wins": e["wins"],
+                "draws": e["draws"],
+                "losses": e["losses"],
+                "status": e["status"],
+                "version_id": version_id,
+                "identity": identity,
+                "channel": channel_map.get(version_id),
+            }
+        )
+    # S4.3E Phase 1: version catalog + channel mapping on the public page.
+    versions = session.query(EngineVersion).order_by(
+        EngineVersion.created_at.asc()
+    ).all()
     version_rows = [
         {
             "version_id": v.version_id,

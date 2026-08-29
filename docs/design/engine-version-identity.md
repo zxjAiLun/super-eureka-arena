@@ -1,8 +1,12 @@
 # Design: EngineVersion identity model (frozen 2026-08-10)
 
-Status: **DESIGN DECISION — frozen, not yet implemented**. Schema/migration work
-is deferred until after the S4.3D formal SPRT conclusion and the S4.3E
-promotion (do NOT implement during an active formal test).
+Status: **IMPLEMENTED — V2.1 lifecycle active** (schema landed in
+Phase 1; the V2.1 controlled lifecycle, atomic promotion and production
+launch-identity gate below are live). Earlier sections are kept as the
+frozen design record; where they say "not yet implemented", read them as
+the 2026-08-10 snapshot. Lifecycle metadata (`status`, `public_visible`,
+`rating_enabled`) is mutable BY DESIGN through the controlled promotion
+flow — only the identity fields listed in the V2.1 section are immutable.
 
 ## Problem
 
@@ -129,6 +133,148 @@ dev candidate
 Rejected/experimental candidates (e.g. RootHistory, RootPrevScore) may be
 registered as `status=experimental, rating_enabled=true` participants so their
 true relative strength against the production line can be measured later.
+
+## V2.1: controlled lifecycle + atomic promotion (frozen 2026-08-28)
+
+### Immutability vs lifecycle metadata
+
+"Immutable" covers exactly the chess/launch identity —
+`version_id, build_id, command_args, uci_options, source_sha,
+binary_sha256, identity_fingerprint` can NEVER change after creation.
+The lifecycle metadata `status, public_visible, rating_enabled` is mutable
+but ONLY through the controlled promotion flow — never ad-hoc edits:
+
+```text
+candidate    (hidden, unrated)   --create defaults
+   |
+   | promote_channel(channel, version)   # ONE transaction, all-or-nothing
+   v
+production   (public, rated)     + old production -> historical
+   |
+   v
+historical   (public, rated)     # still a valid history-only participant
+```
+
+A version's identity is WHO THE BINARY IS (source/binary sha + launch
+config), never "which semantic promote-commit it corresponds to". When the
+Engine repo promotes at commit X but the first reproducible artifact built
+afterwards is commit Y, the EngineVersion honestly records Y; the timeline
+below separately narrates the X promotion.
+
+### Registration rules (anti-garbage contract)
+
+- Only immutable binaries with **experiment or promotion significance**
+  become EngineVersions. NOT every git commit.
+- Create defaults: `status=candidate, public_visible=false,
+  rating_enabled=false`. The known-past-production exception (registering
+  history directly as `historical/public/rated`) requires explicit flags.
+- Experimental LOO/ablation profiles stay as hidden `EnginePreset`s
+  (`public_visible=false`); they snapshot into a version only when they
+  become a genuine promotion candidate or long-term Elo participant.
+- Production versions use the artifact's default launch identity:
+  `command_args=[], uci_options={}`. NEVER `["--profile", ...]` — the
+  fingerprint includes command_args, so an explicit alias would create a
+  second, artificial identity for the same chess player.
+
+### Atomic promotion (`services.versions.promote_channel`)
+
+```text
+read channel -> validate target
+  old production.status  -> historical          \
+  target.status          -> production           | ONE transaction;
+  target.public_visible  -> true                 | any failure rolls back
+  target.rating_enabled  -> true                 | EVERYTHING
+  channel                -> target              /
+```
+
+`plan_channel_promotion` builds the same view with ZERO mutation (CLI
+dry-run default). Informational impact counts (rated history, active
+human games on the channel, active tournaments) never block promotion:
+tournaments and HumanGames hold frozen snapshots, so promotion only
+affects the NEXT creation through the channel.
+
+### Operator workflow (admin CLI)
+
+```text
+python -m chessarena.admin engine-version create \
+    --build 20260825-96d1a69-linux-x86_64 \
+    --version ce-currentfinal-20260825 \
+    --name "CurrentFinal · Integrated Positional · 2026-08-25"
+
+python -m chessarena.admin engine-channel promote \
+    current-final ce-currentfinal-20260825        # dry-run by default
+python -m chessarena.admin engine-channel promote \
+    current-final ce-currentfinal-20260825 --yes  # atomic commit
+```
+
+### HTTP surface under the same contract (V2.1 Repair 1)
+
+The old HTTP write paths could bypass the lifecycle entirely; they are now
+part of the contract:
+
+- `POST /api/v1/engine-versions` mints ONLY candidate/experimental
+  versions and always forces `public_visible=false, rating_enabled=false`
+  (the schema no longer accepts production/historical, and smuggled flags
+  are overridden). Registering a known PAST production directly remains a
+  backfill operation for the admin CLI / internal scripts with explicit
+  flags.
+- `PUT /api/v1/engine-channels/{id}` (generic repoint) returns **405** —
+  it could point a channel at a candidate while the old version stayed
+  "production", the exact half-promotion state this contract forbids.
+- `POST /api/v1/engine-channels/{id}/promote` is the controlled surface:
+  it runs the atomic `promote_channel` (full lifecycle transition, one
+  transaction). `set_channel()` stays as an internal service for
+  bootstrap/backfill only.
+- Promotion re-validates the TARGET against the CURRENT build registry:
+  build exists, `enabled=true`, and the version's frozen provenance
+  (`source_sha`, `binary_sha256`) still matches the registry. A build
+  disabled or drifted after candidate creation blocks promotion.
+- Dry-run impact counts are target-specific: rated history and active
+  tournaments are counted via the shared `resolve_participant_id`
+  resolver (legacy fingerprint matches count as the target's history).
+
+## Checkpoint timeline (CurrentFinal lineage, narrated 2026-08-28)
+
+Engine-repo promote commits that shaped CurrentFinal, and which
+EngineVersion artifacts exist in Arena:
+
+```text
+2026-08-06  51a629f  CurrentFinal baseline
+            -> ce-currentfinal-20260806 (historical, public, rated)
+               build 20260806-51a629f-linux-x86_64
+
+2026-08-11  26604c4  promote legality fast path (S4.3E)
+            -> ce-currentfinal-20260811 (historical since V2.1 promotion,
+               public, rated)
+               build 20260811-26604c4-linux-x86_64
+
+2026-08-12  710400a  promote single-buffer movegen (S4.4E)     [no artifact kept]
+2026-08-13  8eb9bd6  promote single-generation probe            [no artifact kept]
+2026-08-16  33dc5e7  promote null-window LMR (S7.4A)            [no artifact kept]
+2026-08-17  a719b57  promote single-evasion (S7.5A)             [no artifact kept]
+            (history milestones only — NOT registered as EngineVersions:
+             no verifiable immutable artifact survives, so no identity)
+
+2026-08-24  b2c0efe  promote integrated positional eval (S8.0,
+            SPRT ACCEPT_H1 +71.3 Elo, +109.3 Elo blitz validation)
+            -> first reproducible artifact AFTER this promotion:
+               build 20260825-96d1a69-linux-x86_64 (5 commits later,
+               includes S9 Eval2Mask infrastructure)
+            -> ce-currentfinal-20260825
+               (production, public, rated; command_args=[], uci_options={})
+               display_name: CurrentFinal · Integrated Positional · 2026-08-25
+               source_sha: 96d1a69b2d884b3f78703d8c87c973dff9eb7830
+               (its current-final profile self-reports
+                "eval handcrafted-v1+integrated-positional", verified)
+
+2026-08-25  75e6eea..f46749a  S9 Eval2 LOO experiment profiles
+            -> NOT EngineVersions; hidden EnginePresets
+               (category=s9-loo-eval2, public_visible=false, enabled=true)
+               on build 20260825-96d1a69-linux-x86_64
+```
+
+Rule frozen with this timeline: the timeline may say "the S8 promotion
+happened on 08-24"; the EngineVersion says exactly which binary it is.
 
 ## When to split RatingParticipant (do NOT pre-commit)
 

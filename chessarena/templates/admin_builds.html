@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}ChessArena · Engine Builds{% endblock %}
+{% block content %}
+<h1>Engine Builds</h1>
+<p class="muted">
+  Immutable artifacts installed by the deploy pipeline. The
+  <em>default identity</em> column shows whether the build has entered the
+  EngineVersion lifecycle with its default launch configuration
+  (<code>command_args=[]</code>, <code>uci_options={}</code>).
+</p>
+
+{% if builds %}
+<table class="match-table">
+  <thead>
+    <tr>
+      <th>Build</th><th>Engine</th><th>Source SHA</th><th>Binary SHA</th>
+      <th>Registry</th><th>Default identity</th><th>Created</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for b in builds %}
+    <tr>
+      <td><code>{{ b.build_id }}</code></td>
+      <td>{{ b.engine_name }}</td>
+      <td><code>{{ b.git_sha[:12] if b.git_sha else "—" }}</code></td>
+      <td><code>{{ b.binary_sha256[:12] }}</code></td>
+      <td>
+        {% if b.enabled %}enabled{% else %}<span class="status status-cancelled">disabled</span>{% endif %}
+      </td>
+      <td>
+        {% if b.registered_version %}
+          <a href="{{ settings.base_path }}/admin/versions/{{ b.registered_version.version_id }}">
+            {{ b.registered_version.display_name }}<br>
+            <code>{{ b.registered_version.version_id }}</code>
+          </a>
+          <span class="status status-{{ b.registered_version.status }}">{{ b.registered_version.status }}</span>
+        {% else %}
+          <span class="muted">Not versioned</span>
+        {% endif %}
+      </td>
+      <td>{{ b.created_at|dt }}</td>
+      <td>
+        {% if not b.enabled %}
+          <span class="muted">&mdash;</span>
+        {% elif b.registered_version %}
+          <a class="action-link" href="{{ settings.base_path }}/admin/versions/{{ b.registered_version.version_id }}">View version</a>
+        {% else %}
+          <a class="action-link" href="{{ settings.base_path }}/admin/builds/{{ b.build_id }}/version/new">Create Version</a>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p class="muted">No engine builds registered yet.</p>
+{% endif %}
+{% endblock %}

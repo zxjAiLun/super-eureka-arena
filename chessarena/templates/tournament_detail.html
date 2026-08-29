@@ -9,6 +9,14 @@
   {% include "_tournament_status.html" %}
 </div>
 
+{% if experiment %}
+<div id="experiment-fragment"
+     hx-get="{{ settings.base_path }}/admin/tournaments/{{ tournament.id }}/experiment-status"
+     hx-trigger="every 5s" hx-swap="innerHTML">
+  {% include "_experiment_status.html" %}
+</div>
+{% endif %}
+
 {% if result_terminal %}
 <section class="panel result-summary">
   <h3>Result</h3>
@@ -23,7 +31,15 @@
   </dl>
   <p class="actions">
     <a class="action-link" href="{{ settings.base_path }}/matches/{{ tournament.id }}">Replay games</a>
-    <a class="action-link" href="{{ run_again }}">Run again</a>
+    {% if experiment and experiment.decision_rule == 'sprt' %}
+      <span class="muted">
+        This form cannot recreate the frozen decision contract — set up a
+        formal experiment instead.
+      </span>
+      <a class="action-link" href="{{ settings.base_path }}/admin/experiments/formal/new">Set up formal experiment</a>
+    {% else %}
+      <a class="action-link" href="{{ run_again }}">Run again</a>
+    {% endif %}
   </p>
 </section>
 {% endif %}
