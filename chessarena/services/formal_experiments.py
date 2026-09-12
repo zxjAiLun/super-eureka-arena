@@ -8,7 +8,9 @@ The planner composes EXISTING primitives into the formal contract:
   the preset-alias mis-selection class);
 - candidate: preset (experimental profile) or candidate/experimental
   EngineVersion for confirmation; strictly an EngineVersion passing the
-  full V2.1 promotion gate for promotion;
+  promotion gate (build provenance + declared model artifacts, S10-D0)
+  for promotion; explicit launch args are identity, not an eligibility
+  restriction (v0.2.0 contract);
 - statistical model: fixed pentanomial/pair/logistic SPRT; only the
   hypothesis parameters (elo0/elo1/alpha/beta/max_pairs) are inputs;
 - opening independence: prior runs' frozen opening samples are rebuilt
@@ -95,12 +97,12 @@ def _resolve_candidate(session, candidate_ref: str) -> tuple[dict, list]:
             return {}, [f"candidate preset build disabled: {preset.build_id}"]
         args = list(preset.command_args or [])
         opts = dict(preset.uci_options or {})
-        # S10-D0: a candidate preset carrying --nnue-model must resolve to a
-        # declared, byte-verified model artifact (shared gate with the
-        # scheduler prelaunch and version provenance).
+        # S10-D0: a candidate preset carrying --nnue-model or an EvalFile
+        # override must resolve to declared, byte-verified model artifacts
+        # (shared gate with the scheduler prelaunch and version provenance).
         from .model_artifacts import validate_launch_artifacts
 
-        model_errors = validate_launch_artifacts(build, args)
+        model_errors = validate_launch_artifacts(build, args, opts)
         if model_errors:
             return {}, model_errors
         return {

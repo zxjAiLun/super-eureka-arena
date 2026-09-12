@@ -456,11 +456,25 @@ def _default_identity_target(session_factory, registered,
     build_dir.mkdir(parents=True, exist_ok=True)
     content = b"second dummy engine binary for promotion tests"
     (build_dir / "engine").write_bytes(content)
+    # v0.2.0 shape: the build DECLARES an S14 model artifact and the real
+    # file exists with matching bytes (the S10-D0 gate verifies live SHA).
+    import hashlib as _hashlib
+    models_dir = build_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    model_bytes = b"synthetic s14 datasupply v5 model for promotion tests"
+    (models_dir / "nnue-s14-datasupply-v5.bin").write_bytes(model_bytes)
     m2 = {
         "schema_version": 1,
         "build_id": "build2-x86_64",
         "git_sha": "b" * 40,
-        "binary_sha256": hashlib.sha256(content).hexdigest(),
+        "binary_sha256": _hashlib.sha256(content).hexdigest(),
+        "model_artifacts": [
+            {
+                "model_id": "s14-datasupply-v5-seed20260908",
+                "relative_path": "models/nnue-s14-datasupply-v5.bin",
+                "sha256": _hashlib.sha256(model_bytes).hexdigest(),
+            }
+        ],
     }
     (build_dir / "manifest.json").write_text(_json.dumps(m2))
     with session_factory() as session:
@@ -630,17 +644,6 @@ def test_v21_failed_promotion_no_partial_state(engine_factory, registered):
         assert old.status == "production"  # not demoted
         assert versions.get_channel(
             session, "current-final").engine_version_id == old_id
-        # also: target already historical is rejected
-        hist = versions.create_version_from_preset(
-            session, version_id="ce-hist-x", display_name="Hist X",
-            preset_id="chessengine-production", status="historical",
-        )
-        with pytest.raises(VersionError):
-            versions.promote_channel("current-final", "ce-hist-x") if False \
-                else versions.promote_channel(
-                    session, "current-final", hist.version_id)
-        assert versions.get_channel(
-            session, "current-final").engine_version_id == old_id
 
 
 def test_v21_promotion_rejects_noop_and_unknown_channel(
@@ -803,8 +806,8 @@ def test_v21_admin_cli_engine_version_create_and_promote(
         versions.set_channel(session, "current-final", "ce-old-prod")
 
     # create --from-preset: candidate / hidden / unrated, frozen args
-    # (preset snapshots stay experiment-grade identities — they can never
-    # pass the production launch-identity gate below)
+    # (preset snapshots stay experiment-grade identities; under the v0.2.0
+    # contract they are eligible, but stay candidate until promoted)
     rc = admin.main([
         "engine-version", "create",
         "--from-preset", "chessengine-production",
@@ -829,13 +832,18 @@ def test_v21_admin_cli_engine_version_create_and_promote(
     ], settings=cli_settings)
     assert rc == 2
 
-    # a preset-derived (profile) candidate can NEVER be promoted
+    # An explicit preset-derived identity is eligible. Without --yes this is
+    # a read-only plan, so the channel and status mirror remain unchanged.
     rc = admin.main([
         "engine-channel", "promote", "current-final", "ce-cli-cand",
     ], settings=cli_settings)
-    assert rc == 2  # production launch-identity gate: profile args
+    assert rc == 0
+    with engine_factory() as session:
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == "ce-old-prod"
+        assert versions.get_version(session, "ce-cli-cand").status == "candidate"
 
-    # create the DEFAULT-identity promotion target from the second build
+    # Create a second identity from the second build for the --yes path.
     rc = admin.main([
         "engine-version", "create",
         "--build", "build2-x86_64",
@@ -1088,48 +1096,39 @@ def test_v21r_impact_counts_are_target_specific(
 
 
 # ---------------------------------------------------------------------------
-# V2.1-A Repair 2: production launch-identity gate
+# v0.2.0 production identity contract: explicit launch args are eligible
 # ---------------------------------------------------------------------------
-def test_v21r2_profile_args_block_promotion(engine_factory, registered):
-    """Repair 2: a candidate created with an explicit profile alias
-    (however it was created — here via the service, the same shape HTTP
-    can mint) can NEVER reach production: plan.ok false, promote raises,
-    zero mutation on channel/old/target."""
+def test_v21r2_profile_args_are_eligible_for_promotion(
+    engine_factory, registered
+):
+    """Explicit launch arguments are part of the immutable identity and
+    are eligible when build provenance remains valid."""
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
     with engine_factory() as session:
-        # same build as the old production, but with a profile alias —
-        # a distinct fingerprint, so creation succeeds as candidate.
         target = versions.create_version_from_build(
-            session, version_id="ce-fake-cf", display_name="Fake CurrentFinal",
+            session, version_id="ce-explicit-profile", display_name="Explicit profile",
             build_id=manifest["build_id"],
             command_args=["--profile", "current-final"],
             uci_options={}, status="candidate",
         )
         plan = versions.plan_channel_promotion(
             session, "current-final", target.version_id)
-        assert not plan.ok
-        assert any("command_args=[]" in e for e in plan["errors"])
-
-        with pytest.raises(VersionError):
-            versions.promote_channel(
-                session, "current-final", target.version_id)
-
-        # zero mutation
-        assert versions.get_version(
-            session, old_id).status == "production"
+        assert plan.ok, plan["errors"]
+        versions.promote_channel(session, "current-final", target.version_id)
         assert versions.get_channel(
-            session, "current-final").engine_version_id == old_id
-        tgt = versions.get_version(session, "ce-fake-cf")
-        assert tgt.status == "candidate"
-        assert tgt.public_visible is False
-        assert tgt.rating_enabled is False
+            session, "current-final").engine_version_id == target.version_id
+        assert versions.get_version(session, old_id).status == "historical"
+        promoted = versions.get_version(session, target.version_id)
+        assert promoted.status == "production"
+        assert promoted.public_visible is True
+        assert promoted.rating_enabled is True
 
 
-def test_v21r2_nonempty_uci_options_block_promotion(
+def test_v21r2_nonempty_uci_options_are_eligible_for_promotion(
     engine_factory, registered
 ):
-    """Repair 2: a candidate with non-default UCI options (e.g. Hash=999)
-    also fails the production launch-identity gate."""
+    """Non-default UCI options are also frozen identity fields, not a
+    production eligibility failure by themselves."""
     manifest, old_id = _setup_promotion_scene(engine_factory, registered)
     with engine_factory() as session:
         target = versions.create_version_from_build(
@@ -1140,13 +1139,12 @@ def test_v21r2_nonempty_uci_options_block_promotion(
         )
         plan = versions.plan_channel_promotion(
             session, "current-final", target.version_id)
-        assert not plan.ok
-        assert any("uci_options={}" in e for e in plan["errors"])
-        with pytest.raises(VersionError):
-            versions.promote_channel(
-                session, "current-final", target.version_id)
+        assert plan.ok, plan["errors"]
+        versions.promote_channel(session, "current-final", target.version_id)
         assert versions.get_channel(
-            session, "current-final").engine_version_id == old_id
+            session, "current-final").engine_version_id == target.version_id
+        assert versions.get_version(session, old_id).status == "historical"
+        assert versions.get_version(session, target.version_id).status == "production"
 
 
 def test_v21r2_default_identity_target_still_promotes(
@@ -1199,3 +1197,297 @@ def test_v21r2_default_identity_target_still_promotes(
             "ce-clean-default"
         assert versions.get_version(
             session, "ce-clean-default").status == "production"
+
+
+def test_v020_rollback_round_trip_hce_nnue_hce(engine_factory, registered):
+    """Eureka v0.2.0 release gate: the `current-final` channel must round-trip.
+
+    Regression for the old `historical` terminal-status deadlock: once a
+    version was demoted it could never be selected again, so rollback was
+    impossible by construction. `status` is now a compatibility mirror only
+    and never gates eligibility.
+
+    HCE -> v0.2.0 -> HCE -> v0.2.0, asserting the channel pointer, the
+    single-production mirror, and every immutable field at each step.
+    """
+    manifest = _manifest(registered)
+    with engine_factory() as session:
+        hce = versions.create_version_from_build(
+            session, version_id="ce-hce-20260825", display_name="HCE 20260825",
+            build_id=manifest["build_id"], command_args=[],
+            status="production", rating_enabled=True, public_visible=True,
+        )
+        versions.set_channel(session, "current-final", hce.version_id)
+
+        # A SECOND build that actually DECLARES the S14 model artifact, as
+        # the real v0.2.0 build does. The S10-D0 gate refuses a
+        # `--nnue-model` launch whose build does not declare that artifact,
+        # so this must mirror production rather than a bare test build.
+        import hashlib
+        import json as _json
+        from pathlib import Path
+        from chessarena.models import EngineBuild
+
+        build_dir = Path(registered["build_dir"]).parent / "build-v020"
+        build_dir.mkdir(parents=True, exist_ok=True)
+        content = b"v0.2.0 dummy engine binary (nnue capable)"
+        (build_dir / "engine").write_bytes(content)
+        model_rel = "models/nnue-s14-datasupply-v5.bin"
+        model_path = build_dir / model_rel
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        model_bytes = b"synthetic s14 artifact for the release round-trip"
+        model_path.write_bytes(model_bytes)
+        model_sha = hashlib.sha256(model_bytes).hexdigest()
+        m2 = {
+            "schema_version": 1,
+            "build_id": "build-v020-x86_64",
+            "git_sha": "c" * 40,
+            "binary_sha256": hashlib.sha256(content).hexdigest(),
+            "model_artifacts": [
+                {
+                    "model_id": "s14-datasupply-v5",
+                    "relative_path": model_rel,
+                    "sha256": model_sha,
+                }
+            ],
+        }
+        (build_dir / "manifest.json").write_text(_json.dumps(m2))
+        if session.query(EngineBuild).filter(
+            EngineBuild.build_id == "build-v020-x86_64"
+        ).first() is None:
+            session.add(EngineBuild(
+                build_id="build-v020-x86_64",
+                engine_name="ChessEngineDemo",
+                git_sha=m2["git_sha"],
+                binary_path=str(build_dir / "engine"),
+                binary_sha256=m2["binary_sha256"], platform="x86_64",
+                supported_profiles=[], manifest=m2, enabled=True,
+            ))
+            session.commit()
+        release = versions.create_version_from_build(
+            session, version_id="ce-v020", display_name="Eureka v0.2.0",
+            build_id="build-v020-x86_64",
+            # Real v0.2.0 launch identity: explicit NNUE + declared S14
+            # artifact. It must differ from the HCE version's config (the
+            # immutable-fingerprint invariant forbids two identical ones).
+            command_args=[
+                "--evaluation", "nnue",
+                "--nnue-model", str(model_path.resolve()),
+            ],
+            status="candidate",
+        )
+        hce_immutable = _immutable_fields(versions.get_version(session, hce.version_id))
+        rel_immutable = _immutable_fields(versions.get_version(session, release.version_id))
+
+        def snapshot():
+            return {
+                "channel": versions.get_channel(
+                    session, "current-final").engine_version_id,
+                "hce": versions.get_version(session, hce.version_id).status,
+                "rel": versions.get_version(session, release.version_id).status,
+            }
+
+        # 1. HCE -> v0.2.0
+        versions.promote_channel(session, "current-final", release.version_id)
+        assert snapshot() == {
+            "channel": "ce-v020", "hce": "historical", "rel": "production"}
+        assert versions.get_version(session, release.version_id).public_visible
+        assert versions.get_version(session, release.version_id).rating_enabled
+
+        # 2. v0.2.0 -> HCE (ROLLBACK: the case that used to be impossible)
+        plan = versions.plan_channel_promotion(
+            session, "current-final", hce.version_id)
+        assert plan.ok, plan["errors"]
+        versions.promote_channel(session, "current-final", hce.version_id)
+        assert snapshot() == {
+            "channel": "ce-hce-20260825", "hce": "production", "rel": "historical"}
+
+        # 3. HCE -> v0.2.0 again (re-promote the same archived version)
+        plan = versions.plan_channel_promotion(
+            session, "current-final", release.version_id)
+        assert plan.ok, plan["errors"]
+        versions.promote_channel(session, "current-final", release.version_id)
+        assert snapshot() == {
+            "channel": "ce-v020", "hce": "historical", "rel": "production"}
+
+        # Exactly one production mirror throughout; immutable identity intact.
+        production = [
+            v for v in versions.list_versions(session) if v.status == "production"
+        ]
+        assert [v.version_id for v in production] == ["ce-v020"]
+        assert _immutable_fields(
+            versions.get_version(session, hce.version_id)) == hce_immutable
+        assert _immutable_fields(
+            versions.get_version(session, release.version_id)) == rel_immutable
+
+
+def test_v020_display_name_is_product_version_not_rd_name(
+    engine_factory, registered
+):
+    """The public opponent name must be the product version (`Eureka v0.2.0`),
+    never an R&D identity like `CurrentFinal · ... · 2026-08-25`.
+
+    `display_name` is what `human_play.list_opponents` returns to Play, so
+    this is the user-visible contract.
+    """
+    from chessarena.services import human_play
+
+    manifest = _manifest(registered)
+    with engine_factory() as session:
+        rel = versions.create_version_from_build(
+            session, version_id="ce-v020", display_name="Eureka v0.2.0",
+            build_id=manifest["build_id"], command_args=[],
+            status="production", rating_enabled=True, public_visible=True,
+        )
+        versions.set_channel(session, "current-final", rel.version_id)
+
+        opponents = human_play.list_opponents(session, ["channel:current-final"])
+        assert len(opponents) == 1
+        assert opponents[0]["display_name"] == "Eureka v0.2.0"
+        for rd_marker in ("CurrentFinal", "2026-", "-dev+", "b3145e1"):
+            assert rd_marker not in opponents[0]["display_name"]
+
+
+def _register_nnue_build(session, registered, build_id, model_rels):
+    """Register a second build that DECLARES the given model artifacts, with
+    real files on disk whose bytes match the manifest SHA (S10-D0 shape)."""
+    import hashlib
+    from pathlib import Path
+
+    build_dir = Path(registered["build_dir"]).parent / build_id
+    build_dir.mkdir(parents=True, exist_ok=True)
+    content = f"{build_id} dummy engine binary (nnue capable)".encode()
+    (build_dir / "engine").write_bytes(content)
+    entries = []
+    for rel in model_rels:
+        model_path = build_dir / rel
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        data = f"model bytes for {build_id}/{rel}".encode()
+        model_path.write_bytes(data)
+        entries.append({
+            "model_id": Path(rel).stem,
+            "relative_path": rel,
+            "sha256": hashlib.sha256(data).hexdigest(),
+        })
+    manifest = {
+        "schema_version": 1,
+        "build_id": build_id,
+        "git_sha": "c" * 40,
+        "binary_sha256": hashlib.sha256(content).hexdigest(),
+        "model_artifacts": entries,
+    }
+    (build_dir / "manifest.json").write_text(json.dumps(manifest))
+    if session.query(EngineBuild).filter(
+        EngineBuild.build_id == build_id
+    ).first() is None:
+        session.add(EngineBuild(
+            build_id=build_id,
+            engine_name="ChessEngineDemo",
+            git_sha=manifest["git_sha"],
+            binary_path=str(build_dir / "engine"),
+            binary_sha256=manifest["binary_sha256"], platform="x86_64",
+            supported_profiles=[], manifest=manifest, enabled=True,
+        ))
+        session.commit()
+    return build_dir
+
+
+def test_v020_evalfile_override_undeclared_model_rejected(
+    engine_factory, registered
+):
+    """Regression (Gate A close-out): `EvalFile` in uci_options is applied
+    AFTER launch (human_engine) and is the model the engine actually loads,
+    so the shared S10-D0 gate must validate it exactly like --nnue-model.
+    Declaring model A in the manifest must not whitewash an undeclared
+    EvalFile model B — the 'plan validates A, runtime loads B' bypass."""
+    manifest = _manifest(registered)
+    with engine_factory() as session:
+        hce = versions.create_version_from_build(
+            session, version_id="ce-hce-20260825", display_name="HCE 20260825",
+            build_id=manifest["build_id"], command_args=[],
+            status="production", rating_enabled=True, public_visible=True,
+        )
+        versions.set_channel(session, "current-final", hce.version_id)
+
+        build_dir = _register_nnue_build(
+            session, registered, "build-evalfile-x86_64",
+            ["models/nnue-s14-datasupply-v5.bin"])
+        declared_model = build_dir / "models" / "nnue-s14-datasupply-v5.bin"
+        undeclared = build_dir / "models" / "undeclared-override.bin"
+        undeclared.write_bytes(b"model B: exists on disk, NOT in the manifest")
+
+        release = versions.create_version_from_build(
+            session, version_id="ce-v020-evalfile",
+            display_name="Eureka v0.2.0",
+            build_id="build-evalfile-x86_64",
+            command_args=[
+                "--evaluation", "nnue",
+                "--nnue-model", str(declared_model.resolve()),
+            ],
+            uci_options={"EvalFile": str(undeclared.resolve())},
+            status="candidate",
+        )
+        plan = versions.plan_channel_promotion(
+            session, "current-final", release.version_id)
+        assert not plan.ok
+        assert any("EvalFile" in e for e in plan["errors"]), plan["errors"]
+        assert any("undeclared" in e for e in plan["errors"])
+        with pytest.raises(VersionError):
+            versions.promote_channel(
+                session, "current-final", release.version_id)
+        # zero mutation: the bypass must not reach production.
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == hce.version_id
+        assert versions.get_version(
+            session, release.version_id).status == "candidate"
+
+
+def test_v020_evalfile_override_tampered_model_rejected(
+    engine_factory, registered
+):
+    """A declared EvalFile override is eligible (positive control), but when
+    the referenced artifact's live bytes stop matching the manifest SHA the
+    same gate must reject promotion — the immutable fingerprint pins the
+    path string, the SHA gate pins the bytes."""
+    manifest = _manifest(registered)
+    with engine_factory() as session:
+        hce = versions.create_version_from_build(
+            session, version_id="ce-hce-20260825", display_name="HCE 20260825",
+            build_id=manifest["build_id"], command_args=[],
+            status="production", rating_enabled=True, public_visible=True,
+        )
+        versions.set_channel(session, "current-final", hce.version_id)
+
+        build_dir = _register_nnue_build(
+            session, registered, "build-tamper-x86_64",
+            ["models/nnue-s14-datasupply-v5.bin", "models/override-net.bin"])
+        declared_model = build_dir / "models" / "nnue-s14-datasupply-v5.bin"
+        override_model = build_dir / "models" / "override-net.bin"
+
+        release = versions.create_version_from_build(
+            session, version_id="ce-v020-tamper",
+            display_name="Eureka v0.2.0",
+            build_id="build-tamper-x86_64",
+            command_args=[
+                "--evaluation", "nnue",
+                "--nnue-model", str(declared_model.resolve()),
+            ],
+            uci_options={"EvalFile": str(override_model.resolve())},
+            status="candidate",
+        )
+        # Positive control: both paths declared, live bytes match manifest.
+        plan = versions.plan_channel_promotion(
+            session, "current-final", release.version_id)
+        assert plan.ok, plan["errors"]
+
+        # Tamper ONLY the EvalFile override artifact after registration.
+        override_model.write_bytes(b"tampered after the fact")
+        plan = versions.plan_channel_promotion(
+            session, "current-final", release.version_id)
+        assert not plan.ok
+        assert any("SHA mismatch" in e for e in plan["errors"]), plan["errors"]
+        with pytest.raises(VersionError):
+            versions.promote_channel(
+                session, "current-final", release.version_id)
+        assert versions.get_channel(
+            session, "current-final").engine_version_id == hce.version_id

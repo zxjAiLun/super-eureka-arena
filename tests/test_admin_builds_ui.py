@@ -124,7 +124,7 @@ def test_disabled_build_creation_fail_closed(app_client, engine_factory,
 
 # ---------------------------------------------------------------------------
 # (4) admin create always yields candidate|experimental + hidden + unrated
-#     + default launch identity, and redirects to the version detail
+#     with immutable launch identity and redirects to the version detail
 # ---------------------------------------------------------------------------
 def test_admin_create_defaults_and_redirect(app_client, engine_factory,
                                              registered):

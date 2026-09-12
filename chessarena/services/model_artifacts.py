@@ -22,9 +22,11 @@ re-implements the path/SHA rules:
     check + make_readonly, called before the build is registered;
   * validate_launch_artifacts() — prelaunch/provenance check shared by the
     scheduler's per-pair check, version provenance validation and formal
-    candidate resolution: a ``--nnue-model`` in command_args must point at
-    exactly one manifest-declared artifact whose live bytes still hash to
-    the declared SHA.
+    candidate resolution: every model path the launch would make the engine
+    load — a ``--nnue-model`` in command_args and/or a non-empty
+    ``EvalFile`` in uci_options — must point at exactly one
+    manifest-declared artifact whose live bytes still hash to the declared
+    SHA.
 """
 
 from __future__ import annotations
@@ -38,6 +40,10 @@ from .cutechess import CutechessLaunchError
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 MODEL_FLAG = "--nnue-model"
+# uci option applied AFTER launch (human_engine / cutechess option policy):
+# whenever set it is the model the engine actually loads, silently
+# overriding the --nnue-model startup artifact, so it needs the same gate.
+EVAL_FILE_OPTION = "EvalFile"
 
 
 def is_sha256_hex(value) -> bool:
@@ -146,38 +152,60 @@ def _artifact_paths(build) -> dict[str, dict]:
     return out
 
 
-def validate_launch_artifacts(build, command_args) -> list[str]:
+def validate_launch_artifacts(build, command_args, uci_options=None) -> list[str]:
     """Shared prelaunch/provenance gate for model artifacts.
 
-    * ``command_args`` without ``--nnue-model``: no model requirement.
-    * with ``--nnue-model <path>``: the path must resolve to exactly one
-      artifact declared in the build's manifest, and the live file must
-      still hash to the declared SHA-256.
+    Every model path the launch would make the engine load must resolve to
+    exactly one artifact declared in the build's manifest, and the live
+    file must still hash to the declared SHA-256:
+
+    * ``--nnue-model <path>`` in ``command_args`` (the startup model);
+    * a non-empty ``EvalFile`` in ``uci_options`` — applied AFTER launch
+      (human_engine / cutechess option policy), so it is the effective
+      model whenever set and silently overrides the startup model.
 
     Returns a list of human-readable errors (empty = valid); callers map
     this to CutechessLaunchError (scheduler, fail-closed before Popen) or
     append it to provenance error lists (versions / formal experiments).
     """
     args = list(command_args or [])
+    options = dict(uci_options or {})
+
+    # (source, raw path) for every model reference; raw None = dangling flag.
+    refs: list[tuple[str, str | None]] = []
+    for i, token in enumerate(args):
+        if token == MODEL_FLAG:
+            refs.append(
+                (MODEL_FLAG, args[i + 1] if i + 1 < len(args) else None)
+            )
+    evalfile = options.get(EVAL_FILE_OPTION)
+    if isinstance(evalfile, str) and evalfile.strip():
+        refs.append((EVAL_FILE_OPTION, evalfile))
+
     errors: list[str] = []
-    if MODEL_FLAG not in args:
+    if not refs:
         return errors
 
     declared = _artifact_paths(build)
     if not declared:
-        return [
-            f"build {build.build_id} declares no model_artifacts but "
-            f"command_args reference {MODEL_FLAG}"
-        ]
+        sources = {source for source, _raw in refs}
+        if MODEL_FLAG in sources:
+            errors.append(
+                f"build {build.build_id} declares no model_artifacts but "
+                f"command_args reference {MODEL_FLAG}"
+            )
+        if EVAL_FILE_OPTION in sources:
+            errors.append(
+                f"build {build.build_id} declares no model_artifacts but "
+                f"uci_options set {EVAL_FILE_OPTION}"
+            )
+        return errors
 
     build_dir = Path(build.binary_path).parent
-    for i, token in enumerate(args):
-        if token != MODEL_FLAG:
-            continue
-        if i + 1 >= len(args):
+    for source, raw in refs:
+        if raw is None:
             errors.append(f"{MODEL_FLAG} requires a value in command_args")
             continue
-        raw = args[i + 1]
         resolved = str(Path(raw).resolve())
         entry = declared.get(resolved)
         if entry is None:
@@ -186,12 +214,12 @@ def validate_launch_artifacts(build, command_args) -> list[str]:
             )
             if inside:
                 errors.append(
-                    f"{MODEL_FLAG} points at an undeclared file inside the "
+                    f"{source} points at an undeclared file inside the "
                     f"build: {raw}"
                 )
             else:
                 errors.append(
-                    f"{MODEL_FLAG} points outside the build's declared "
+                    f"{source} points outside the build's declared "
                     f"model artifacts: {raw}"
                 )
             continue

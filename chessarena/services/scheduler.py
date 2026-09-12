@@ -779,8 +779,9 @@ class Scheduler:
 
         # S10-D0: model artifacts get the same per-pair fail-closed pinning
         # as the binary — frozen list vs live manifest, then the shared
-        # gate resolves --nnue-model against the declared artifacts and
-        # re-hashes the actual file bytes before Popen.
+        # gate resolves --nnue-model and any frozen uci_options EvalFile
+        # override against the declared artifacts and re-hashes the actual
+        # file bytes before Popen.
         from ..services.model_artifacts import (
             normalize_model_artifacts,
             validate_launch_artifacts,
@@ -800,7 +801,8 @@ class Scheduler:
                     f"{label}: live build model_artifacts differ from the "
                     f"frozen snapshot ({build.build_id})"
                 )
-            model_errors = validate_launch_artifacts(build, cfg["command_args"])
+            model_errors = validate_launch_artifacts(
+                build, cfg["command_args"], cfg.get("uci_options"))
             if model_errors:
                 raise cc.CutechessLaunchError(
                     f"{label}: " + "; ".join(model_errors)

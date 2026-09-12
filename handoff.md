@@ -87,6 +87,22 @@ CI:            arena pytest（含 Playwright chromium）+ replay-app build fresh
 无 Rust toolchain / 无真实引擎 binary 需求（fake cutechess + dummy engine）
 ```
 
+WSL 下运行 pytest 必须前置 venv 解释器（2026-09-12 更正验收记录）：
+`tests/fixtures/fake_cutechess.py` 以 `#!/usr/bin/env python3` 直接启动，
+PATH 未前置 `.venv-wsl/bin` 时会选到 venv 之外的 Python，报
+`ModuleNotFoundError: No module named 'chess'`——此现象曾被误判为
+"cutechess-cli 缺失"的环境阻塞，实为解释器选择问题，并非环境缺口。
+正确命令（2026-09-12 实测版本/推广相关三个测试文件 66/66 通过，
+含 scheduler artifact 预检用例）：
+
+```bash
+cd /mnt/e/AUbuntuProject/project/chessenginearena
+PATH="$PWD/.venv-wsl/bin:$PATH" .venv-wsl/bin/python -m pytest \
+  tests/test_engine_versions.py tests/test_model_artifacts.py \
+  tests/test_admin_builds_ui.py -q
+```
+
+
 ## 尚未执行（生产部署清单）
 
 ```text

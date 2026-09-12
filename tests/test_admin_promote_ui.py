@@ -93,21 +93,28 @@ def test_preview_zero_mutation_renders_plan(app_client, engine_factory,
 # ---------------------------------------------------------------------------
 def test_blocked_plan_has_no_confirm(app_client, engine_factory, registered):
     manifest, old_id, target_id = _scene(engine_factory, registered)
-    # profile-args candidate: the launch-identity gate blocks it
+    # an --nnue-model candidate on a build that declares no model_artifacts:
+    # the S10-D0 artifact gate blocks it (under the v0.2.0 identity contract
+    # explicit args themselves are eligible — artifact verification is not)
+    from pathlib import Path
     with engine_factory() as session:
         versions.create_version_from_build(
-            session, version_id="ce-profile-cand",
-            display_name="Profile Cand",
+            session, version_id="ce-nnue-cand",
+            display_name="Nnue Cand",
             build_id=manifest["build_id"],
-            command_args=["--profile", "current-final"],
+            command_args=[
+                "--evaluation", "nnue",
+                "--nnue-model",
+                str(Path(registered["build_dir"]) / "models" / "ghost.bin"),
+            ],
             status="candidate",
         )
         session.commit()
     r = app_client.get(
-        "/chessarena/admin/versions/ce-profile-cand/promote/current-final")
+        "/chessarena/admin/versions/ce-nnue-cand/promote/current-final")
     assert r.status_code == 200
     assert "Blocked" in r.text
-    assert "command_args=[]" in r.text  # the gate error is rendered
+    assert "declares no model_artifacts" in r.text  # the gate error renders
     assert "Confirm promotion" not in r.text
 
     # a disabled build also blocks the real target

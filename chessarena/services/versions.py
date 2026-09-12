@@ -319,13 +319,19 @@ def validate_version_build_provenance(
             f"binary_sha256 {version.binary_sha256} != registry "
             f"binary_sha256 {build.binary_sha256}"
         )
-    # S10-D0: a --nnue-model launch must point at a declared, byte-verified
-    # model artifact of the CURRENT build (shared gate with the scheduler's
-    # per-pair prelaunch check).
+    # S10-D0: every model path the launch would load — a --nnue-model in
+    # command_args and/or an EvalFile override in uci_options (applied after
+    # launch) — must point at a declared, byte-verified model artifact of
+    # the CURRENT build (shared gate with the scheduler's per-pair prelaunch
+    # check).
     from .model_artifacts import validate_launch_artifacts
 
     errors.extend(
-        validate_launch_artifacts(build, list(version.command_args or []))
+        validate_launch_artifacts(
+            build,
+            list(version.command_args or []),
+            dict(version.uci_options or {}),
+        )
     )
     return errors
 
@@ -335,37 +341,6 @@ def _validate_target_build(session, target: EngineVersion) -> list[str]:
     still match the CURRENT registry (thin wrapper over the shared
     validator)."""
     return validate_version_build_provenance(session, target)
-
-
-def _validate_production_launch_identity(target: EngineVersion) -> list[str]:
-    """Production gate: only the artifact's DEFAULT launch identity may
-    ever reach production (the frozen V2.1 anti-garbage contract).
-
-    The identity fingerprint includes command_args/uci_options, so a
-    production version launched via an explicit profile alias (or any
-    non-default UCI config) would be an artificial SECOND identity for the
-    same chess player.  Profile/config identities may exist as
-    candidates/experimental and play in tournaments; if one wins, the
-    Engine repo promotes it, a NEW default-production artifact is built,
-    and THAT version (command_args=[], uci_options={}) is the one promoted.
-
-    This gate runs regardless of HOW the version was created (HTTP, CLI,
-    internal script, preset snapshot) — promotion is the single last door
-    to the production status."""
-    errors: list[str] = []
-    if list(target.command_args or []):
-        errors.append(
-            f"target {target.version_id} production launch must use the "
-            f"artifact default command_args=[] "
-            f"(got {list(target.command_args)})"
-        )
-    if dict(target.uci_options or {}):
-        errors.append(
-            f"target {target.version_id} production launch must use the "
-            f"artifact default uci_options={{}} "
-            f"(got {dict(target.uci_options)})"
-        )
-    return errors
 
 
 def plan_channel_promotion(
@@ -381,8 +356,12 @@ def plan_channel_promotion(
 
     Fail-closed conditions (block promotion):
       unknown channel / unknown target / noop / target already production
-      on another channel / target historical / target build disabled or
-      provenance-mismatched against the CURRENT registry.
+      on another channel / target build disabled or provenance-mismatched
+      against the CURRENT registry / declared artifact validation failure.
+
+    ``status`` is a compatibility mirror, not eligibility state: a target
+    previously switched away from this channel may be ``historical`` and is
+    intentionally eligible for rollback/re-promotion.
     """
     from ..models import HumanGame, Tournament
 
@@ -407,23 +386,19 @@ def plan_channel_promotion(
                 f"channel {channel_id} already points at "
                 f"{target_version_id}"
             )
-        if target.status == "historical":
-            errors.append(
-                f"target {target_version_id} is historical and cannot be "
-                f"promoted"
-            )
+        # NOTE: `status` is a compatibility mirror only (see promote_channel);
+        # a formerly-produced version keeps status="historical" but stays
+        # eligible for selection. Rollback must not be blocked by status.
         if target.status == "production":
             errors.append(
                 f"target {target_version_id} is already production on "
                 f"another channel"
             )
         # Production gate: the target's build must still be registered,
-        # enabled, and provenance-consistent (P1-2), AND it must carry the
-        # artifact's default launch identity — no profile aliases or
-        # non-default UCI configs may ever reach production (V2.1-A
-        # Repair 2).
+        # enabled, provenance-consistent (P1-2), and pass all declared
+        # artifact checks (S10-D0). command_args/uci_options are frozen
+        # identity fields, not an eligibility restriction.
         errors.extend(_validate_target_build(session, target))
-        errors.extend(_validate_production_launch_identity(target))
 
     plan = PromotionPlan(
         channel_id=channel_id,

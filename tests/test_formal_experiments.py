@@ -180,10 +180,17 @@ def test_promotion_candidate_must_be_version(engine_factory, registered):
 def test_promotion_candidate_must_pass_promotion_gate(
     engine_factory, registered
 ):
+    """Under the v0.2.0 identity contract explicit launch args are eligible,
+    so the promotion gate no longer rejects profile identities. The gate
+    that still protects the promotion stage is build provenance + declared
+    model artifacts (S10-D0) via the shared validators: an undeclared
+    --nnue-model candidate fails closed before planning."""
+    from pathlib import Path
+
     _scene(engine_factory, registered)
-    # a candidate VERSION with a profile arg — fails the launch-identity gate
     m2 = _register_build(engine_factory, registered, "ver-cand-build",
                          git_sha="c" * 40)
+    build_dir = Path(registered["build_dir"]).parent / "ver-cand-build"
     with engine_factory() as session:
         versions.create_version_from_build(
             session, version_id="ce-cand-profile",
@@ -192,15 +199,34 @@ def test_promotion_candidate_must_pass_promotion_gate(
             command_args=["--profile", "experimental"],
             uci_options={}, status="candidate",
         )
+        versions.create_version_from_build(
+            session, version_id="ce-cand-badmodel",
+            display_name="Cand With Undeclared Model",
+            build_id="ver-cand-build",
+            command_args=[
+                "--evaluation", "nnue",
+                "--nnue-model",
+                str(build_dir / "models" / "ghost.bin"),
+            ],
+            uci_options={}, status="candidate",
+        )
         session.commit()
+    opening = _get_opening_set(engine_factory)
     with engine_factory() as session:
-        opening = _get_opening_set(engine_factory)
         plan = formal_experiments.plan_formal_experiment(
             session, _draft(stage="promotion",
                             candidate="version:ce-cand-profile"),
             opening, seed=42)
+        # explicit args are immutable identity, not an eligibility failure
+        assert not any("promotion gate:" in e for e in plan["errors"])
+    with engine_factory() as session:
+        plan = formal_experiments.plan_formal_experiment(
+            session, _draft(stage="promotion",
+                            candidate="version:ce-cand-badmodel"),
+            opening, seed=42)
         assert not plan.ok
-        assert any("promotion gate:" in e for e in plan["errors"])
+        assert any("declares no model_artifacts" in e
+                   for e in plan["errors"]), plan["errors"]
 
 
 # ---------------------------------------------------------------------------
